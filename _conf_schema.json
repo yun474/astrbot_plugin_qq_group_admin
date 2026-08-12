@@ -1,6 +1,6 @@
 {
   "enable_mute_command": {
-    "description": "启用 /禁言 @用户 时间 指令",
+    "description": "启用 /禁言 @用户 [时间] 和 /解禁 @用户 指令",
     "type": "bool",
     "default": true
   },
@@ -9,10 +9,26 @@
     "type": "bool",
     "default": true
   },
+  "enable_unmute_tool": {
+    "description": "启用给大模型使用的 QQ 群解禁工具",
+    "type": "bool",
+    "default": true
+  },
+  "enable_mute_status_command": {
+    "description": "启用 /禁言状态 指令",
+    "type": "bool",
+    "default": true,
+    "hint": "展示全员禁言模式、定时/周期规则和当前被禁言成员。机器人需要拥有 QQ 群管理员身份。"
+  },
+  "enable_mute_status_tool": {
+    "description": "启用给大模型使用的 QQ 群禁言状态查询工具",
+    "type": "bool",
+    "default": true
+  },
   "default_mute_duration": {
     "description": "默认禁言时长",
     "type": "string",
-    "default": "10分",
+    "default": "1分",
     "hint": "执行 /禁言 @用户 时如果不填写时间，则使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。禁言工具省略时长时也使用此值。"
   },
   "enable_join_notice": {
@@ -38,7 +54,8 @@
   "enable_group_admin_commands": {
     "description": "启用 /添加群管、/删除群管、/群管列表、/群管帮助 指令",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "/群管帮助优先使用 QQ Markdown 发送；平台不支持时由 AstrBot 自动降级为纯文本。"
   },
   "enable_member_join_notice": {
     "description": "启用成员进群欢迎消息",

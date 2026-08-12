@@ -52,6 +52,13 @@ class QQGroupManageAPI:
             payload={"members": [member]},
         )
 
+    async def get_mute_status(self, group_openid: str) -> Any:
+        group_id = quote(group_openid, safe="")
+        return await self._request(
+            "GET",
+            f"/v2/groups/{group_id}/restrict_chat_setting",
+        )
+
     async def list_join_requests(
         self,
         group_openid: str,

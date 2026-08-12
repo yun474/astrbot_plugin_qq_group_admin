@@ -4,6 +4,8 @@ from pathlib import Path
 
 from astrbot_plugin_qq_group_admin.main import (
     extract_mute_duration,
+    format_group_admin_help,
+    format_mute_status,
     format_request,
     parse_duration,
     render_member_notice,
@@ -13,6 +15,41 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
 class CoreTests(unittest.TestCase):
+    def test_group_admin_help_uses_configured_default(self) -> None:
+        text = format_group_admin_help("3分")
+        self.assertIn("# 🛡️ QQ 群管帮助", text)
+        self.assertIn("默认 **3分**", text)
+        self.assertIn("`/解禁 @用户`", text)
+        self.assertIn("`/禁言状态`", text)
+
+    def test_format_mute_status_contains_rules_and_member(self) -> None:
+        text = format_mute_status(
+            {
+                "global_rule": {
+                    "mode": "schedule",
+                    "recurring_rules": [
+                        {
+                            "task_id": "task-1",
+                            "weekdays": [1, 7],
+                            "start_time": "23:00",
+                            "end_time": "07:00",
+                            "enabled": True,
+                        }
+                    ],
+                },
+                "members": [
+                    {
+                        "username": "测试用户",
+                        "member_openid": "member-1",
+                        "mute_expire_at": "2026-08-12T12:00:00+08:00",
+                    }
+                ],
+            }
+        )
+        self.assertIn("按规则全员禁言", text)
+        self.assertIn("周一、周日 23:00-07:00", text)
+        self.assertIn("测试用户（member-1）", text)
+
     def test_missing_duration_uses_configured_default(self) -> None:
         self.assertEqual(
             extract_mute_duration("禁言 <@member-1>", "<@member-1>", "20分"),

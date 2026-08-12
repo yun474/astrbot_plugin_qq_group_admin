@@ -67,11 +67,85 @@ def format_request(item: dict[str, Any], index: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def format_mute_status(result: dict[str, Any]) -> str:
+    global_rule = result.get("global_rule") or {}
+    mode = global_rule.get("mode") or "none"
+    mode_text = {
+        "none": "未开启",
+        "always": "始终全员禁言",
+        "schedule": "按规则全员禁言",
+    }.get(mode, f"未知模式（{mode}）")
+    lines = ["本群禁言状态", f"全员禁言：{mode_text}"]
+
+    schedule_rules = global_rule.get("schedule_rules") or []
+    if schedule_rules:
+        lines.append("定时规则：")
+        for rule in schedule_rules:
+            enabled = "启用" if rule.get("enabled") else "停用"
+            lines.append(
+                f"- [{enabled}] {rule.get('start_at') or '未知'} 至 "
+                f"{rule.get('end_at') or '未知'}（{rule.get('task_id') or '无任务 ID'}）"
+            )
+
+    recurring_rules = global_rule.get("recurring_rules") or []
+    if recurring_rules:
+        weekday_names = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "日"}
+        lines.append("周期规则：")
+        for rule in recurring_rules:
+            enabled = "启用" if rule.get("enabled") else "停用"
+            weekdays = "、".join(
+                f"周{weekday_names.get(day, day)}" for day in rule.get("weekdays", [])
+            ) or "未指定星期"
+            lines.append(
+                f"- [{enabled}] {weekdays} {rule.get('start_time') or '未知'}-"
+                f"{rule.get('end_time') or '未知'}（{rule.get('task_id') or '无任务 ID'}）"
+            )
+
+    members = result.get("members") or []
+    lines.append(f"单独禁言成员：{len(members)} 人")
+    for member in members:
+        username = member.get("username") or "未知昵称"
+        member_openid = member.get("member_openid") or "未知 OpenID"
+        expire_at = member.get("mute_expire_at") or "未知"
+        lines.append(f"- {username}（{member_openid}），到期：{expire_at}")
+    return "\n".join(lines)
+
+
+def format_group_admin_help(default_duration: str) -> str:
+    return (
+        "# 🛡️ QQ 群管帮助\n\n"
+        "## 成员管理\n\n"
+        "> `/禁言 @用户 [时间]`  \n"
+        f"> 禁言成员；不填时间默认 **{default_duration}**\n\n"
+        "> `/解禁 @用户`  \n"
+        "> 解除成员禁言\n\n"
+        "> `/禁言状态`  \n"
+        "> 查看全员禁言规则及被禁言成员\n\n"
+        "## 群管管理\n\n"
+        "> `/添加群管 @用户`  \n"
+        "> 添加本群群管，仅 AstrBot 管理员可用\n\n"
+        "> `/删除群管 @用户`  \n"
+        "> 删除本群群管，仅 AstrBot 管理员可用\n\n"
+        "> `/群管列表`  \n"
+        "> 查看本群群管\n\n"
+        "## 时间格式\n\n"
+        "支持 `30秒`、`10分`、`2小时`、`1天2小时`  \n"
+        "纯数字按分钟处理，例如 `30` 表示 **30分钟**\n\n"
+        "## 入群审批\n\n"
+        "回复入群申请通知：\n\n"
+        "- `同意`\n"
+        "- `拒绝`\n"
+        "- `拒绝 理由`\n\n"
+        "---\n\n"
+        "💡 AstrBot 管理员默认拥有所有群的群管权限。"
+    )
+
+
 @register(
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.1.0",
+    "2.2.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -331,7 +405,7 @@ class QQGroupAdminPlugin(Star):
             time = extract_mute_duration(
                 event.get_message_str(),
                 time,
-                str(self.config.get("default_mute_duration", "10分") or "10分"),
+                str(self.config.get("default_mute_duration", "1分") or "1分"),
             )
             seconds = parse_duration(time)
             self._validate_duration(seconds)
@@ -344,6 +418,30 @@ class QQGroupAdminPlugin(Star):
             yield event.plain_result(f"已解除 {len(targets)} 名成员的禁言。")
         else:
             yield event.plain_result(f"已禁言 {len(targets)} 名成员，时长 {time}。")
+
+    @filter.command("解禁")
+    async def unmute_command(self, event: AstrMessageEvent) -> None:
+        """解除被艾特成员的禁言。"""
+        if not self.config.get("enable_mute_command", True):
+            yield event.plain_result("禁言指令已在插件配置中关闭。")
+            return
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("你不是本群群管，也不是 AstrBot 管理员。")
+            return
+        targets = self._mentioned_members(event)
+        if not targets:
+            yield event.plain_result("请艾特要解除禁言的成员，例如：/解禁 @用户")
+            return
+        try:
+            for member_openid in targets:
+                await self._mute(event, event.get_group_id(), member_openid, 0)
+        except Exception as exc:
+            yield event.plain_result(f"解禁失败：{exc}")
+            return
+        yield event.plain_result(f"已解除 {len(targets)} 名成员的禁言。")
 
     @filter.command("添加群管")
     async def add_group_admin(self, event: AstrMessageEvent) -> None:
@@ -396,21 +494,35 @@ class QQGroupAdminPlugin(Star):
         if not self.config.get("enable_group_admin_commands", True):
             return
         default_duration = str(
-            self.config.get("default_mute_duration", "10分") or "10分"
+            self.config.get("default_mute_duration", "1分") or "1分"
         )
-        yield event.plain_result(
-            "QQ 群管帮助\n"
-            "/禁言 @用户 [时间] - 禁言成员；不填时间默认 "
-            f"{default_duration}\n"
-            "/禁言 @用户 解除 - 解除禁言\n"
-            "/添加群管 @用户 - 添加本群群管（仅 AstrBot 管理员）\n"
-            "/删除群管 @用户 - 删除本群群管（仅 AstrBot 管理员）\n"
-            "/群管列表 - 查看本群群管\n"
-            "/群管帮助 - 显示本帮助\n\n"
-            "时间支持：30秒、10分、2小时、1天2小时；纯数字按分钟。\n"
-            "入群申请：群管回复申请通知发送“同意”或“拒绝 [理由]”即可审批。\n"
-            "AstrBot 管理员默认在所有群拥有群管权限。"
+        yield event.plain_result(format_group_admin_help(default_duration)).use_markdown(
+            True
         )
+
+    @filter.command("禁言状态")
+    async def mute_status_command(self, event: AstrMessageEvent) -> None:
+        """查看全员禁言规则和当前处于禁言中的成员。"""
+        if not self.config.get("enable_mute_status_command", True):
+            yield event.plain_result("禁言状态指令已在插件配置中关闭。")
+            return
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("你不是本群群管，也不是 AstrBot 管理员。")
+            return
+        try:
+            result = await QQGroupManageAPI(
+                self._platform(event).client
+            ).get_mute_status(event.get_group_id())
+        except Exception as exc:
+            yield event.plain_result(f"查询禁言状态失败：{exc}")
+            return
+        if not isinstance(result, dict):
+            yield event.plain_result("查询禁言状态失败：接口返回格式异常。")
+            return
+        yield event.plain_result(format_mute_status(result))
 
     @filter.llm_tool(name="qq_group_mute_member")
     async def mute_tool(
@@ -431,7 +543,7 @@ class QQGroupAdminPlugin(Star):
             return event.plain_result("当前场景无权使用 QQ 群禁言工具。")
         try:
             duration = duration.strip() or str(
-                self.config.get("default_mute_duration", "10分") or "10分"
+                self.config.get("default_mute_duration", "1分") or "1分"
             )
             seconds = parse_duration(duration)
             self._validate_duration(seconds)
@@ -439,6 +551,44 @@ class QQGroupAdminPlugin(Star):
         except Exception as exc:
             return event.plain_result(f"禁言操作失败：{exc}")
         return event.plain_result("解禁成功。" if seconds == 0 else f"禁言成功，时长 {duration}。")
+
+    @filter.llm_tool(name="qq_group_unmute_member")
+    async def unmute_tool(
+        self,
+        event: AstrMessageEvent,
+        member_openid: str,
+    ) -> MessageEventResult:
+        """解除当前 QQ 群一名普通成员的禁言，仅群管可用。
+
+        Args:
+            member_openid(string): 被解除禁言成员的群成员 OpenID
+        """
+        if not self.config.get("enable_unmute_tool", True):
+            return event.plain_result("QQ 群解禁工具已关闭。")
+        if not self._is_qq_group(event) or not self._can_manage(event):
+            return event.plain_result("当前场景无权使用 QQ 群解禁工具。")
+        try:
+            await self._mute(event, event.get_group_id(), member_openid, 0)
+        except Exception as exc:
+            return event.plain_result(f"解禁操作失败：{exc}")
+        return event.plain_result("解禁成功。")
+
+    @filter.llm_tool(name="qq_group_get_mute_status")
+    async def mute_status_tool(self, event: AstrMessageEvent) -> MessageEventResult:
+        """查询当前 QQ 群的全员禁言规则和被禁言成员列表，仅群管可用。"""
+        if not self.config.get("enable_mute_status_tool", True):
+            return event.plain_result("QQ 群禁言状态工具已关闭。")
+        if not self._is_qq_group(event) or not self._can_manage(event):
+            return event.plain_result("当前场景无权查询 QQ 群禁言状态。")
+        try:
+            result = await QQGroupManageAPI(
+                self._platform(event).client
+            ).get_mute_status(event.get_group_id())
+        except Exception as exc:
+            return event.plain_result(f"查询禁言状态失败：{exc}")
+        if not isinstance(result, dict):
+            return event.plain_result("查询禁言状态失败：接口返回格式异常。")
+        return event.plain_result(format_mute_status(result))
 
     @filter.llm_tool(name="qq_group_list_join_requests")
     async def list_join_requests_tool(
@@ -621,4 +771,4 @@ def extract_mute_duration(
     text = re.sub(r"^/?禁言\s*", "", message_text.strip())
     text = re.sub(r"<@!?[^>]+>", "", text).strip()
     fallback = re.sub(r"<@!?[^>]+>", "", fallback).strip()
-    return text or fallback or default_duration.strip() or "10分"
+    return text or fallback or default_duration.strip() or "1分"
