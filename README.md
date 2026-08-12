@@ -18,6 +18,12 @@
 - `/添加群管 @用户`、`/删除群管 @用户`、`/群管列表`、`/群管帮助`：按群保存权限；AstrBot 管理员默认全局可用。
 - 所有主要指令、通知和 LLM 工具均有配置开关；禁言和解禁 LLM 工具可分别开关。
 
+LLM 群管工具以机器人自身权限调用 QQ 接口。工具本身不直接发送固定成功通知，而是始终把执行结果交回 LLM，让 Agent Loop 继续并由模型自然回复。开启 `silent_mute_success_notice` 后，仅关闭 `/禁言`、`/解禁` 指令直接产生的“已禁言/已解禁”消息；错误提示和 LLM 自然回复不受影响。
+
+插件兼容 AstrBot 4.26.0 的 `ContextWrapper` 工具调用上下文，同时保留旧版直接传入消息事件的调用方式。
+
+`/禁言` 不依赖 AstrBot 的位置参数绑定，而是从消息组件和文本中自行识别目标与时长。它兼容人工艾特以及 LLM Executor 生成的 At 组件、`@member_openid` 文本，不限制 AstrBot 版本。
+
 ## 安装
 
 把整个 `astrbot_plugin_qq_group_admin` 目录放入 AstrBot 的 `data/plugins/`，然后重载插件或重启 AstrBot。插件不需要额外 Python 依赖。

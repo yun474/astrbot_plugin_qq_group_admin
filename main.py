@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 
@@ -141,11 +141,24 @@ def format_group_admin_help(default_duration: str) -> str:
     )
 
 
+def resolve_tool_event(value: Any) -> AstrMessageEvent:
+    """Accept both legacy AstrMessageEvent and AstrBot 4.26 ContextWrapper."""
+    if hasattr(value, "get_platform_name") and hasattr(value, "get_group_id"):
+        return value
+    context = getattr(value, "context", None)
+    event = getattr(context, "event", None)
+    if event is None:
+        event = getattr(getattr(context, "context", None), "event", None)
+    if event is None:
+        raise RuntimeError("无法从 AstrBot 工具上下文中取得消息事件")
+    return event
+
+
 @register(
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.2.0",
+    "2.3.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -386,7 +399,7 @@ class QQGroupAdminPlugin(Star):
         yield event.plain_result(result)
 
     @filter.command("禁言")
-    async def mute_command(self, event: AstrMessageEvent, time: str = "") -> None:
+    async def mute_command(self, event: AstrMessageEvent) -> None:
         """禁言被艾特的成员，时间支持 30秒、10分、2小时、1天。"""
         if not self.config.get("enable_mute_command", True):
             yield event.plain_result("禁言指令已在插件配置中关闭。")
@@ -404,7 +417,6 @@ class QQGroupAdminPlugin(Star):
         try:
             time = extract_mute_duration(
                 event.get_message_str(),
-                time,
                 str(self.config.get("default_mute_duration", "1分") or "1分"),
             )
             seconds = parse_duration(time)
@@ -413,6 +425,8 @@ class QQGroupAdminPlugin(Star):
                 await self._mute(event, event.get_group_id(), member_openid, seconds)
         except Exception as exc:
             yield event.plain_result(f"禁言失败：{exc}")
+            return
+        if self.config.get("silent_mute_success_notice", False):
             return
         if seconds == 0:
             yield event.plain_result(f"已解除 {len(targets)} 名成员的禁言。")
@@ -441,6 +455,8 @@ class QQGroupAdminPlugin(Star):
         except Exception as exc:
             yield event.plain_result(f"解禁失败：{exc}")
             return
+        if self.config.get("silent_mute_success_notice", False):
+            return
         yield event.plain_result(f"已解除 {len(targets)} 名成员的禁言。")
 
     @filter.command("添加群管")
@@ -450,7 +466,7 @@ class QQGroupAdminPlugin(Star):
         if not self._is_qq_group(event):
             yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
             return
-        if not event.is_admin():
+        if not event.is_admin() and event.get_sender_id() != event.get_self_id():
             yield event.plain_result("只有 AstrBot 管理员能添加分群群管。")
             return
         targets = self._mentioned_members(event)
@@ -467,7 +483,7 @@ class QQGroupAdminPlugin(Star):
         if not self._is_qq_group(event):
             yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
             return
-        if not event.is_admin():
+        if not event.is_admin() and event.get_sender_id() != event.get_self_id():
             yield event.plain_result("只有 AstrBot 管理员能删除分群群管。")
             return
         targets = self._mentioned_members(event)
@@ -527,20 +543,21 @@ class QQGroupAdminPlugin(Star):
     @filter.llm_tool(name="qq_group_mute_member")
     async def mute_tool(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         member_openid: str,
         duration: str = "",
-    ) -> MessageEventResult:
+    ) -> str:
         """禁言或解禁当前 QQ 群的一名普通成员，仅群管可用。
 
         Args:
             member_openid(string): 被操作成员的群成员 OpenID
             duration(string): 可选禁言时长，如 30秒、10分、2小时、1天；省略时使用插件默认时长，填 0 或 解除表示解禁
         """
+        event = resolve_tool_event(event)
         if not self.config.get("enable_mute_tool", True):
-            return event.plain_result("QQ 群禁言工具已关闭。")
-        if not self._is_qq_group(event) or not self._can_manage(event):
-            return event.plain_result("当前场景无权使用 QQ 群禁言工具。")
+            return "QQ 群禁言工具已关闭。"
+        if not self._is_qq_group(event):
+            return "当前场景不是 QQ 官方机器人群聊，无法使用群禁言工具。"
         try:
             duration = duration.strip() or str(
                 self.config.get("default_mute_duration", "1分") or "1分"
@@ -549,64 +566,68 @@ class QQGroupAdminPlugin(Star):
             self._validate_duration(seconds)
             await self._mute(event, event.get_group_id(), member_openid, seconds)
         except Exception as exc:
-            return event.plain_result(f"禁言操作失败：{exc}")
-        return event.plain_result("解禁成功。" if seconds == 0 else f"禁言成功，时长 {duration}。")
+            return f"禁言操作失败：{exc}"
+        action = "解禁" if seconds == 0 else f"禁言（时长 {duration}）"
+        return f"已成功执行{action}，请根据用户语境自然回复。"
 
     @filter.llm_tool(name="qq_group_unmute_member")
     async def unmute_tool(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         member_openid: str,
-    ) -> MessageEventResult:
+    ) -> str:
         """解除当前 QQ 群一名普通成员的禁言，仅群管可用。
 
         Args:
             member_openid(string): 被解除禁言成员的群成员 OpenID
         """
+        event = resolve_tool_event(event)
         if not self.config.get("enable_unmute_tool", True):
-            return event.plain_result("QQ 群解禁工具已关闭。")
-        if not self._is_qq_group(event) or not self._can_manage(event):
-            return event.plain_result("当前场景无权使用 QQ 群解禁工具。")
+            return "QQ 群解禁工具已关闭。"
+        if not self._is_qq_group(event):
+            return "当前场景不是 QQ 官方机器人群聊，无法使用群解禁工具。"
         try:
             await self._mute(event, event.get_group_id(), member_openid, 0)
         except Exception as exc:
-            return event.plain_result(f"解禁操作失败：{exc}")
-        return event.plain_result("解禁成功。")
+            return f"解禁操作失败：{exc}"
+        return "已成功执行解禁，请根据用户语境自然回复。"
 
     @filter.llm_tool(name="qq_group_get_mute_status")
-    async def mute_status_tool(self, event: AstrMessageEvent) -> MessageEventResult:
+    async def mute_status_tool(self, event: Any) -> str:
         """查询当前 QQ 群的全员禁言规则和被禁言成员列表，仅群管可用。"""
+        event = resolve_tool_event(event)
         if not self.config.get("enable_mute_status_tool", True):
-            return event.plain_result("QQ 群禁言状态工具已关闭。")
-        if not self._is_qq_group(event) or not self._can_manage(event):
-            return event.plain_result("当前场景无权查询 QQ 群禁言状态。")
+            return "QQ 群禁言状态工具已关闭。"
+        if not self._is_qq_group(event):
+            return "当前场景不是 QQ 官方机器人群聊，无法查询群禁言状态。"
         try:
             result = await QQGroupManageAPI(
                 self._platform(event).client
             ).get_mute_status(event.get_group_id())
         except Exception as exc:
-            return event.plain_result(f"查询禁言状态失败：{exc}")
+            return f"查询禁言状态失败：{exc}"
         if not isinstance(result, dict):
-            return event.plain_result("查询禁言状态失败：接口返回格式异常。")
-        return event.plain_result(format_mute_status(result))
+            return "查询禁言状态失败：接口返回格式异常。"
+        return format_mute_status(result)
 
     @filter.llm_tool(name="qq_group_list_join_requests")
     async def list_join_requests_tool(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         cursor: str = "",
         limit: int = 20,
-    ) -> MessageEventResult:
+    ) -> str:
         """拉取当前 QQ 群待处理的入群申请列表，仅群管可用。
 
         Args:
             cursor(string): 分页游标，第一页传空字符串
             limit(number): 拉取条数，范围 1 到 100
         """
+        event = resolve_tool_event(event)
         if not self.config.get("enable_join_list_tool", True):
-            return event.plain_result("入群申请列表工具已关闭。")
-        if not self._is_qq_group(event) or not self._can_manage(event):
-            return event.plain_result("当前场景无权拉取入群申请。")
+            return "入群申请列表工具已关闭。"
+        if not self._is_qq_group(event):
+            return "当前场景不是 QQ 官方机器人群聊，无法拉取入群申请。"
         platform = self._platform(event)
         try:
             result = await QQGroupManageAPI(platform.client).list_join_requests(
@@ -615,25 +636,25 @@ class QQGroupAdminPlugin(Star):
                 limit=limit or int(self.config.get("join_request_page_size", 20)),
             )
         except Exception as exc:
-            return event.plain_result(f"拉取入群申请失败：{exc}")
+            return f"拉取入群申请失败：{exc}"
         items = result.get("list", []) if isinstance(result, dict) else []
         if not items:
-            return event.plain_result("当前没有待处理的入群申请。")
+            return "当前没有待处理的入群申请。"
         text = "\n\n".join(format_request(item, index) for index, item in enumerate(items, 1))
         next_cursor = result.get("next_cursor", "") if isinstance(result, dict) else ""
         if next_cursor:
             text += f"\n\n下一页 cursor：{next_cursor}"
-        return event.plain_result(text)
+        return text
 
     @filter.llm_tool(name="qq_group_review_join_request")
     async def review_join_request_tool(
         self,
-        event: AstrMessageEvent,
+        event: Any,
         member_openid: str,
         join_request_id: str,
         action: str,
         reject_reason: str = "",
-    ) -> MessageEventResult:
+    ) -> str:
         """同意或拒绝当前 QQ 群的某个入群申请，仅群管可用。
 
         Args:
@@ -642,13 +663,14 @@ class QQGroupAdminPlugin(Star):
             action(string): approve 表示同意，decline 表示拒绝
             reject_reason(string): 拒绝理由，同意时留空
         """
+        event = resolve_tool_event(event)
         if not self.config.get("enable_join_review_tool", True):
-            return event.plain_result("入群申请审批工具已关闭。")
-        if not self._is_qq_group(event) or not self._can_manage(event):
-            return event.plain_result("当前场景无权审批入群申请。")
+            return "入群申请审批工具已关闭。"
+        if not self._is_qq_group(event):
+            return "当前场景不是 QQ 官方机器人群聊，无法审批入群申请。"
         action = action.strip().lower()
         if action not in {"approve", "decline"}:
-            return event.plain_result("action 只能是 approve 或 decline。")
+            return "action 只能是 approve 或 decline。"
         try:
             await self._review(
                 event,
@@ -659,8 +681,10 @@ class QQGroupAdminPlugin(Star):
                 reject_reason,
             )
         except Exception as exc:
-            return event.plain_result(f"审批失败：{exc}")
-        return event.plain_result("已同意入群申请。" if action == "approve" else "已拒绝入群申请。")
+            return f"审批失败：{exc}"
+        if action == "approve":
+            return "已同意入群申请，请根据用户语境自然回复。"
+        return "已拒绝入群申请，请根据用户语境自然回复。"
 
     async def _mute(
         self,
@@ -707,7 +731,11 @@ class QQGroupAdminPlugin(Star):
         return event.get_platform_name() in QQ_PLATFORMS and bool(event.get_group_id())
 
     def _can_manage(self, event: AstrMessageEvent) -> bool:
-        return event.is_admin() or event.get_sender_id() in self.storage.group_admins(event.get_group_id())
+        return (
+            event.get_sender_id() == event.get_self_id()
+            or event.is_admin()
+            or event.get_sender_id() in self.storage.group_admins(event.get_group_id())
+        )
 
     def _mentioned_members(self, event: AstrMessageEvent) -> list[str]:
         raw = getattr(event.message_obj, "raw_message", None)
@@ -764,11 +792,11 @@ def render_member_notice(template: str, member_openid: str, *, can_at: bool) -> 
 
 def extract_mute_duration(
     message_text: str,
-    fallback: str,
     default_duration: str,
 ) -> str:
-    """Extract an optional duration while discarding QQ mention markup."""
+    """Extract duration without letting command executors turn mentions into args."""
     text = re.sub(r"^/?禁言\s*", "", message_text.strip())
+    text = re.sub(r"<qqbot-at-user\b[^>]*/?>", "", text, flags=re.I)
     text = re.sub(r"<@!?[^>]+>", "", text).strip()
-    fallback = re.sub(r"<@!?[^>]+>", "", fallback).strip()
-    return text or fallback or default_duration.strip() or "1分"
+    text = re.sub(r"(?<!\S)@\S+", "", text).strip()
+    return text or default_duration.strip() or "1分"

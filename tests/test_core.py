@@ -1,6 +1,10 @@
+import asyncio
 import tempfile
 import unittest
+from inspect import signature
 from pathlib import Path
+
+from astrbot.api.message_components import At, Plain
 
 from astrbot_plugin_qq_group_admin.main import (
     extract_mute_duration,
@@ -8,13 +12,124 @@ from astrbot_plugin_qq_group_admin.main import (
     format_mute_status,
     format_request,
     parse_duration,
+    QQGroupAdminPlugin,
     render_member_notice,
+    resolve_tool_event,
 )
 from astrbot_plugin_qq_group_admin.api import QQBotRoute
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
 class CoreTests(unittest.TestCase):
+    def test_silent_notice_config_never_stops_llm_natural_reply(self) -> None:
+        class Event:
+            @staticmethod
+            def get_platform_name() -> str:
+                return "qq_official"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+        async def fake_mute(*args, **kwargs):
+            return {}
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_mute_tool": True,
+            "silent_mute_success_notice": True,
+        }
+        plugin._mute = fake_mute
+        plugin._validate_duration = lambda seconds: None
+        result = asyncio.run(plugin.mute_tool(Event(), "member-1", "1分"))
+        self.assertIn("请根据用户语境自然回复", result)
+        self.assertNotIn("不要在最终回复", result)
+
+    def test_llm_executor_at_component_is_detected(self) -> None:
+        class MessageObject:
+            raw_message = None
+            message = [
+                Plain(text="/禁言"),
+                At(qq="MEMBER_OPENID"),
+                Plain(text=" 3分"),
+            ]
+
+        class Event:
+            message_obj = MessageObject()
+
+            @classmethod
+            def get_messages(cls):
+                return cls.message_obj.message
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "BOT_OPENID"
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        self.assertEqual(plugin._mentioned_members(Event()), ["MEMBER_OPENID"])
+
+    def test_resolve_astrbot_426_tool_context(self) -> None:
+        expected_event = object()
+
+        class AgentContext:
+            event = expected_event
+
+        class ContextWrapper:
+            context = AgentContext()
+
+        self.assertIs(resolve_tool_event(ContextWrapper()), expected_event)
+
+    def test_resolve_legacy_tool_event(self) -> None:
+        class Event:
+            @staticmethod
+            def get_platform_name() -> str:
+                return "qq_official"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+        event = Event()
+        self.assertIs(resolve_tool_event(event), event)
+
+    def test_llm_tools_return_text_to_continue_agent_loop(self) -> None:
+        tool_names = (
+            "mute_tool",
+            "unmute_tool",
+            "mute_status_tool",
+            "list_join_requests_tool",
+            "review_join_request_tool",
+        )
+        for name in tool_names:
+            self.assertEqual(signature(getattr(QQGroupAdminPlugin, name)).return_annotation, "str")
+
+    def test_bot_sender_has_group_management_permission(self) -> None:
+        class Storage:
+            @staticmethod
+            def group_admins(group_id: str) -> list[str]:
+                return []
+
+        class Event:
+            @staticmethod
+            def get_sender_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @staticmethod
+            def is_admin() -> bool:
+                return False
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.storage = Storage()
+        self.assertTrue(plugin._can_manage(Event()))
+
     def test_group_admin_help_uses_configured_default(self) -> None:
         text = format_group_admin_help("3分")
         self.assertIn("# 🛡️ QQ 群管帮助", text)
@@ -52,15 +167,38 @@ class CoreTests(unittest.TestCase):
 
     def test_missing_duration_uses_configured_default(self) -> None:
         self.assertEqual(
-            extract_mute_duration("禁言 <@member-1>", "<@member-1>", "20分"),
+            extract_mute_duration("禁言 <@member-1>", "20分"),
             "20分",
         )
 
     def test_explicit_duration_overrides_default(self) -> None:
         self.assertEqual(
-            extract_mute_duration("禁言 <@member-1> 2小时", "", "20分"),
+            extract_mute_duration("禁言 <@member-1> 2小时", "20分"),
             "2小时",
         )
+
+    def test_llm_executor_text_at_does_not_become_duration(self) -> None:
+        self.assertEqual(
+            extract_mute_duration("/禁言 @MEMBER_OPENID 3分", "1分"),
+            "3分",
+        )
+        self.assertEqual(
+            extract_mute_duration("/禁言 @MEMBER_OPENID", "1分"),
+            "1分",
+        )
+
+    def test_qq_bot_xml_at_does_not_become_duration(self) -> None:
+        self.assertEqual(
+            extract_mute_duration(
+                '/禁言 <qqbot-at-user id="MEMBER_OPENID" /> 4分',
+                "1分",
+            ),
+            "4分",
+        )
+
+    def test_mute_command_has_no_positional_parameters(self) -> None:
+        params = list(signature(QQGroupAdminPlugin.mute_command).parameters)
+        self.assertEqual(params, ["self", "event"])
 
     def test_member_notice_only_renders_at_placeholder(self) -> None:
         text = render_member_notice(
