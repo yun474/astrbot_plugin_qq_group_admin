@@ -1,81 +1,76 @@
 {
-  "enabled": {
-    "description": "启用 QQ 群通知",
+  "enable_mute_command": {
+    "description": "启用 /禁言 @用户 时间 指令",
+    "type": "bool",
+    "default": true
+  },
+  "enable_mute_tool": {
+    "description": "启用给大模型使用的 QQ 群禁言工具",
+    "type": "bool",
+    "default": true
+  },
+  "enable_join_notice": {
+    "description": "收到入群申请时自动发送到对应群",
+    "type": "bool",
+    "default": true
+  },
+  "enable_join_reply_review": {
+    "description": "允许群管回复申请通知并发送“同意”或“拒绝 理由”",
+    "type": "bool",
+    "default": true
+  },
+  "enable_join_list_tool": {
+    "description": "启用给大模型使用的入群申请列表工具",
+    "type": "bool",
+    "default": true
+  },
+  "enable_join_review_tool": {
+    "description": "启用给大模型使用的入群申请审批工具",
+    "type": "bool",
+    "default": true
+  },
+  "enable_group_admin_commands": {
+    "description": "启用 /添加群管、/删除群管、/群管列表 指令",
+    "type": "bool",
+    "default": true
+  },
+  "enable_member_join_notice": {
+    "description": "启用成员进群欢迎消息",
     "type": "bool",
     "default": true,
-    "hint": "总开关。关闭后仍会加载兼容桥，但不会发送任何通知。"
-  },
-  "enable_bot_join": {
-    "description": "机器人加入群聊时打招呼",
-    "type": "bool",
-    "default": true,
-    "hint": "处理 GROUP_ADD_ROBOT。"
-  },
-  "bot_join_message": {
-    "description": "机器人入群消息",
-    "type": "text",
-    "default": "大家好，云云来啦～以后请多关照。",
-    "hint": "支持 README 中列出的占位符，例如 {group_name}、{operator_nickname}、{bot_name}。"
-  },
-  "enable_member_join": {
-    "description": "成员进群欢迎",
-    "type": "bool",
-    "default": true,
-    "hint": "处理 GROUP_MEMBER_ADD。是否下发该事件最终由 QQ 开放平台决定。"
+    "hint": "处理 GROUP_MEMBER_ADD。消息模板只支持 {member_at}，它会真正艾特新成员。"
   },
   "member_join_message": {
-    "description": "成员进群消息",
+    "description": "成员进群欢迎模板",
     "type": "text",
-    "default": "欢迎 {member_at} 加入 {group_display}！",
-    "hint": "默认使用 {member_at} 真正 @ 新成员；发送失败时自动回退到昵称或 OpenID。"
+    "default": "欢迎 {member_at} 加入群聊！",
+    "hint": "唯一支持的占位符是 {member_at}。"
   },
-  "enable_member_leave": {
-    "description": "成员退群通知",
+  "enable_member_leave_notice": {
+    "description": "启用成员退群通知",
     "type": "bool",
     "default": true,
-    "hint": "处理 GROUP_MEMBER_REMOVE。"
+    "hint": "处理 GROUP_MEMBER_REMOVE。QQ 退群事件不提供昵称，成员退出后也无法再艾特。"
   },
   "member_leave_message": {
-    "description": "成员退群消息",
+    "description": "成员退群通知模板",
     "type": "text",
-    "default": "{member_display} 已退出 {group_display}。",
-    "hint": "支持 README 中列出的全部占位符。"
+    "default": "有成员退出了群聊。",
+    "hint": "只识别 {member_at}，但退群后 QQ 无法真正艾特，该占位符只会显示成员 OpenID；退群事件没有昵称字段。"
   },
-  "group_filter_mode": {
-    "description": "群过滤模式",
-    "type": "string",
-    "options": ["disabled", "blacklist", "whitelist"],
-    "default": "disabled",
-    "hint": "disabled=所有群；blacklist=排除黑名单；whitelist=只允许白名单。列表填写群 OpenID，不是数字群号。"
-  },
-  "blacklist_groups": {
-    "description": "群黑名单",
-    "type": "text",
-    "default": "",
-    "hint": "填写 group_openid，支持逗号、空格或换行分隔。仅在 blacklist 模式生效。"
-  },
-  "whitelist_groups": {
-    "description": "群白名单",
-    "type": "text",
-    "default": "",
-    "hint": "填写 group_openid，支持逗号、空格或换行分隔。仅在 whitelist 模式生效。"
-  },
-  "group_aliases": {
-    "description": "群名称映射",
-    "type": "text",
-    "default": "",
-    "hint": "QQ 事件通常不带群名。可每行填写 group_openid=群名称，让 {group_name} 稳定显示自定义群名。"
-  },
-  "nickname_cache_size": {
-    "description": "昵称内存缓存上限",
+  "max_mute_seconds": {
+    "description": "单次禁言允许的最长秒数，默认 30 天",
     "type": "int",
-    "default": 4096,
-    "hint": "从本次运行期间的普通群消息积累成员昵称。重启后清空，不保存聊天内容。"
+    "default": 2592000
   },
-  "debug_log": {
-    "description": "调试日志",
-    "type": "bool",
-    "default": false,
-    "hint": "输出重复事件、过滤结果和昵称缓存异常，排查 QQ 是否下发事件时建议开启。"
+  "join_request_page_size": {
+    "description": "入群申请列表工具默认拉取条数（1-100）",
+    "type": "int",
+    "default": 20
+  },
+  "pending_retention_days": {
+    "description": "本地保留申请通知与回复映射的天数",
+    "type": "int",
+    "default": 30
   }
 }

@@ -1,205 +1,94 @@
-# QQ 官方群进退通知
+# QQ Group Admin
 
-云云写的 AstrBot QQ 官方机器人群通知插件。它不修改 AstrBot 源码，通过一个可卸载的运行时事件桥补齐普通群成员进退事件。
+面向 AstrBot 的 QQ 官方机器人群管理插件，直接适配 2026-08 新增的群禁言和入群申请接口。
 
 ## 功能
 
-- 机器人被拉进新群时发送打招呼消息；
-- 普通成员进群时发送欢迎消息；
-- 普通成员退群时发送退群通知；
-- 三种通知分别提供开关和自定义文本；
-- 支持群黑名单、群白名单和不过滤三种模式；
-- 同时支持 `qq_official` WebSocket 和 `qq_official_webhook`；
-- 按 `event_id` 去重，避免 Webhook 重投造成连续欢迎两遍；
-- 尽力从事件字段、普通群消息缓存和手动群名称映射中取得昵称。
-
-最低 AstrBot 版本：`4.26.6`。
+- `/禁言 @用户 时间`：支持 `30秒`、`10分`、`2小时`、`1天2小时`；纯数字按分钟，`0`、`解除`、`解禁`用于解除禁言。
+- `qq_group_mute_member`：提供给大模型的群成员禁言/解禁工具。
+- 自动转发 `GROUP_JOIN_REQUEST` 入群申请事件到对应群，展示昵称、申请时间、来源、邀请人、风险提示、验证消息和入群问答等接口实际返回的信息。
+- 群管回复申请通知并发送 `同意`、`通过`、`拒绝` 或 `拒绝 理由` 即可审批。
+- `qq_group_list_join_requests`：拉取当前群入群申请列表。
+- `qq_group_review_join_request`：同意或拒绝指定申请。
+- 普通成员进群时发送欢迎消息，普通成员退群时发送通知。
+- `/添加群管 @用户`、`/删除群管 @用户`、`/群管列表`：按群保存权限；AstrBot 管理员默认全局可用。
+- 所有主要指令、通知和 LLM 工具均有独立配置开关。
 
 ## 安装
 
-将整个 `astrbot_plugin_qq_group_notice` 目录放入：
+把整个 `astrbot_plugin_qq_group_admin` 目录放入 AstrBot 的 `data/plugins/`，然后重载插件或重启 AstrBot。插件不需要额外 Python 依赖。
+
+QQ 官方平台必须满足：
+
+1. 使用 `qq_official` 或 `qq_official_webhook` 适配器并启用群/C2C 事件。
+2. 机器人已被设置为目标 QQ 群的管理员。
+3. 机器人账号已获开放平台对应接口权限；否则 QQ 会返回无权限错误。
+
+## 成员进退群通知
+
+成员进群欢迎和退群通知分别提供开关与消息模板。为避免一堆实际上拿不到稳定数据的假占位符，模板只支持一个占位符：
+
+| 占位符 | 进群事件 | 退群事件 |
+|---|---|---|
+| `{member_at}` | 生成 `<qqbot-at-user>`，通过 QQ Markdown 真正艾特新成员 | 仅显示成员 OpenID，无法艾特 |
+
+推荐配置：
 
 ```text
-AstrBot/data/plugins/astrbot_plugin_qq_group_notice
+成员进群：欢迎 {member_at} 加入群聊！
+成员退群：有成员退出了群聊。
 ```
 
-然后在 AstrBot 插件管理页重载插件，或重启 AstrBot。
+目前 `GROUP_MEMBER_REMOVE` 只提供 `group_openid`、`member_openid`、`op_member_openid` 和时间戳，没有昵称字段。新的群成员列表接口也只有成员 OpenID 与入群时间，且成员退群后已经不在群内，QQ 客户端无法再渲染对他的艾特。因此插件不提供昵称占位符，也不会假装能在退群通知中艾特对方。
 
-平台必须使用：
+WebSocket 模式会补充成员事件所需的 `GROUP_MEMBER` Intent（`1 << 24`）。如果 QQ 连接已经建立后才热重载插件，需要重载 QQ 平台或重启 AstrBot，才能让新的 Intent 生效；Webhook 模式还需在 QQ 开放平台订阅 `GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
 
-- `qq_official`
-- `qq_official_webhook`
+## 指令权限
 
-NapCat/OneBot 等适配器不在本插件处理范围内。
+| 指令/操作 | AstrBot 管理员 | 当前群的插件群管 | 普通成员 |
+|---|---:|---:|---:|
+| 添加/删除群管 | 是 | 否 | 否 |
+| 查看群管列表 | 是 | 是 | 是 |
+| 禁言/解禁 | 是 | 是 | 否 |
+| 回复审批入群申请 | 是 | 是 | 否 |
+| 群管理 LLM 工具 | 是 | 是 | 否 |
 
-## WebSocket 和 HTTP 回调怎么选
+分群群管保存的是 QQ 官方接口提供的 `member_openid`，不是公开 QQ 号。
 
-### 使用 `qq_official`（WebSocket）
+## 入群申请可用信息
 
-- **不需要**在 QQ 开放平台填写 HTTP 回调地址；
-- AstrBot 主动连接 QQ Gateway 接收事件；
-- 必须开启平台配置里的群聊/C2C 能力；
-- 本插件会在连接建立前补上普通群成员事件所需的 `GROUP_MEMBER` Intents（`1 << 24`）；
-- 首次安装或从旧版升级后，请完整重载 QQ 平台或重启 AstrBot。Intents 在连接握手时确定，只重载插件不一定能让现有连接立即生效。
+接口可能返回以下字段（没返回的字段会显示“未提供”或直接省略）：
 
-### 使用 `qq_official_webhook`（HTTP 回调）
+- `username`：昵称
+- `member_openid` / `union_openid`
+- `join_request_id`
+- `apply_at`：申请时间
+- `apply_source`：来源
+- `invited_by`：邀请人
+- `risk_tips`：风险提示
+- `verify_info.method`
+- `verify_info.verify_message`
+- `verify_info.review_qa_list[]`：问题与回答
 
-- QQ 官方已把 Webhook 作为后续维护方向；如果主人后台能正常配置事件监听，云云更推荐这一模式；
-- **需要**把 AstrBot 平台页显示的公网 HTTPS 回调地址填写到 QQ 开放平台；
-- 统一 Webhook 地址格式通常是 `https://你的域名/api/platform/webhook/{webhook_uuid}`；
-- 回调地址必须能从公网访问，并正确转发到 AstrBot WebUI 端口；
-- 在 QQ 开放平台的事件订阅中勾选机器人进群以及普通群成员加入/退出事件；
-- WebSocket 与 Webhook 选一种接收方式即可，不要把两个 AstrBot 平台实例同时打开，否则可能重复通知。
+回复审批依靠“申请通知消息 ID → 申请信息”的本地映射，默认保留 30 天，数据位于 AstrBot 的 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。
 
-如果 QQ 开放平台的可订阅事件列表里根本没有普通群成员加入/退出，说明当前机器人账号尚未获得该事件权限；插件无法凭空制造腾讯没有下发的事件。
+## 接口说明
 
-## 配置示例
+插件使用 QQ 新 OpenAPI 域名 `api.bot.qq.com`（旧的 `api.sgroup.qq.com` 已于 2026-08-10 下线），调用：
 
-机器人入群：
+- `POST /v2/groups/{group_openid}/restrict_chat_setting`
+- `GET /v2/groups/{group_openid}/join_request_list`
+- `POST /v2/groups/{group_openid}/approval_join_request/{member_openid}`
+- `GROUP_JOIN_REQUEST` 事件
+- `GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` 事件
 
-```text
-大家好，我是 {bot_name}，很高兴加入 {group_display}！
-邀请人：{operator_display}
-```
+禁言接口只能操作普通成员，无法禁言群主、群管理员或机器人；实际限制和权限以 QQ 开放平台为准。
 
-成员进群：
+## 开发
 
-```text
-欢迎 {member_at} 加入 {group_display}！
-昵称：{member_nickname}
-```
-
-成员退群：
-
-```text
-{member_display} 已退出 {group_display}。
-时间：{event_time}
-```
-
-模板里写了插件不认识的占位符时，插件会原样保留它，不会因为一个大括号把整条消息干碎。
-
-## 占位符
-
-### 群信息
-
-| 占位符 | 内容 | 获取与回退方式 |
-| --- | --- | --- |
-| `{group_id}` | 群 OpenID | 直接读取事件，和 `{group_openid}` 相同 |
-| `{group_openid}` | 群 OpenID | QQ 官方群标识，不是数字群号 |
-| `{group_name}` | 群名称 | 手动群名称映射 → 事件字段 → 运行期缓存 → 群 OpenID |
-| `{group_nickname}` | 群名称 | `{group_name}` 的别名 |
-| `{group_display}` | 最适合展示的群名 | 优先群名称，没有时使用群 OpenID |
-
-QQ 官方普通群事件通常不提供稳定的群名称查询接口。若希望 `{group_name}` 始终好看，请在“群名称映射”中填写：
-
-```text
-第一串群OpenID=主人快乐老家
-第二串群OpenID=云云摸鱼分部
-```
-
-每行一条，等号左边是 `group_openid`，右边是希望显示的群名称。
-
-### 成员信息
-
-| 占位符 | 内容 | 获取与回退方式 |
-| --- | --- | --- |
-| `{member_openid}` | 进群或退群成员 OpenID | 直接读取事件 |
-| `{user_id}` | 成员 OpenID | `{member_openid}` 的别名 |
-| `{user_openid}` | 成员 OpenID | `{member_openid}` 的别名 |
-| `{member_nickname}` | 成员昵称/群昵称 | 事件字段 → 本次运行期间的群消息昵称缓存 → 成员 OpenID |
-| `{user_nickname}` | 成员昵称/群昵称 | `{member_nickname}` 的别名 |
-| `{member_display}` | 最适合展示的成员名 | 优先昵称，没有时使用成员 OpenID，再没有则显示“未知成员” |
-| `{member_at}` | @ 该成员 | 输出 QQ 官方新格式 `<qqbot-at-user id="成员OpenID" />`，并自动使用 Markdown 消息发送；退群后通常无法真正 @ 到对方 |
-
-### 操作人信息
-
-操作人通常是邀请机器人或处理成员变动的用户。用户主动退群时，QQ 可能不提供独立操作人。
-
-| 占位符 | 内容 | 获取与回退方式 |
-| --- | --- | --- |
-| `{operator_openid}` | 操作人 OpenID | 读取 `op_member_openid` |
-| `{op_member_openid}` | 操作人 OpenID | `{operator_openid}` 的别名 |
-| `{operator_nickname}` | 操作人昵称 | 事件字段 → 昵称缓存 → 操作人 OpenID |
-| `{operator_display}` | 最适合展示的操作人名称 | 优先昵称，没有时使用 OpenID |
-| `{operator_at}` | @ 操作人 | 输出 `<qqbot-at-user id="操作人OpenID" />`，并自动使用 Markdown 消息发送 |
-
-模板使用 `{member_at}` 或 `{operator_at}` 时，插件会发送 QQ 官方 Markdown 消息，让客户端渲染成蓝色 @。如果机器人没有 Markdown 权限或接口拒绝发送，插件会自动降级为普通昵称/OpenID 文本，不会把原始标签糊到群里。
-
-### 事件与机器人
-
-| 占位符 | 内容 |
-| --- | --- |
-| `{event_type}` | `bot_join`、`member_join` 或 `member_leave` |
-| `{event_id}` | QQ 官方事件 ID |
-| `{event_time}` | 格式化后的本地时间 |
-| `{timestamp}` | QQ 原始时间字段 |
-| `{bot_name}` | botpy 登录信息中可见的机器人名称；拿不到时显示“机器人” |
-
-## 昵称为什么可能只显示 OpenID
-
-插件会尽力获取昵称，但 QQ 官方普通群事件不保证携带昵称或群名：
-
-1. 先读取事件里的 `nickname`、`member_nickname`、`group_name` 等可能字段；
-2. 用户在本次 AstrBot 运行期间说过话时，缓存 `event.get_sender_name()`；
-3. 群名称可以通过“群名称映射”稳定指定；
-4. 都拿不到时回退到 OpenID，保证消息不会出现空洞。
-
-昵称缓存仅保存在内存中，重启后清空，也不会保存聊天内容。新成员第一次进群时尚未说过话，而 QQ 事件又没给昵称，就只能显示 OpenID。这是上游数据边界，不是云云偷懒没写。
-
-## 群黑白名单
-
-“群过滤模式”支持：
-
-- `disabled`：所有群生效；
-- `blacklist`：黑名单里的群不发送；
-- `whitelist`：只在白名单里的群发送。
-
-黑白名单填写的是 `group_openid`，支持逗号、空格或换行分隔：
-
-```text
-GROUP_OPENID_A
-GROUP_OPENID_B
-```
-
-启用白名单但列表为空时，所有群都会被拒绝。这是故意的，免得配置漏了以后全群乱欢迎。
-
-AstrBot 管理员可以在目标群发送：
-
-```text
-/群通知信息
-```
-
-插件会返回当前群 OpenID、已解析的群名称以及黑白名单过滤结果，省得主人在日志里刨那串 ID。
-
-## 事件桥说明
-
-当前 AstrBot 原生 QQ 适配器已经启用 Public Messages Intent，但没有把 `GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE` 注册进 botpy 的解析表。本插件在运行时完成两件事：
-
-1. 为 botpy `ConnectionState` 补充普通群成员进退事件解析器；
-2. 为每个原生 QQ 平台实例绑定通知回调。
-
-插件卸载时会恢复自己绑定的回调和类方法，不写入、不替换 AstrBot 源码文件。如果未来 AstrBot 或 botpy 原生支持这些事件，插件会检测已有解析器并跳过自己的解析补丁。
-
-## 排错
-
-如果机器人入群通知正常，但普通成员进退群没有任何反应：
-
-1. 开启插件的“调试日志”；
-2. 确认机器人使用 `qq_official` 或 `qq_official_webhook`；
-3. 确认群没有被黑白名单过滤；
-4. 检查 QQ 开放平台是否向当前机器人开放并下发 `GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE`；
-5. 搜索日志中的 `[QQ群通知]`。
-
-腾讯没有下发事件时，插件无法凭空知道谁进群了。插件也不会通过轮询群成员列表瞎猜，这样既浪费接口额度，还容易把临时网络错误当成退群。
-
-## 开发检查
-
-```powershell
-python -m compileall -q .
-python -m json.tool _conf_schema.json
+```bash
+python -m compileall .
 python -m unittest discover -s tests -v
 ```
 
-## License
-
-MIT
+仓库：[yun474/astrbot_plugin_qq_group_admin](https://github.com/yun474/astrbot_plugin_qq_group_admin)

@@ -1,1 +1,3 @@
-"""QQ 官方群成员通知插件。"""
+from .main import QQGroupAdminPlugin
+
+__all__ = ["QQGroupAdminPlugin"]

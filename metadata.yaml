@@ -1,10 +1,10 @@
-name: astrbot_plugin_qq_group_notice
-display_name: QQ 官方群进退通知
-desc: 为 QQ 官方机器人提供机器人入群打招呼、成员进群欢迎、成员退群通知以及群黑白名单。
-short_desc: QQ 官方机器人群成员进退通知与欢迎消息。
-version: 1.0.3
-author: 云云
-repo: https://github.com/yun474/astrbot_plugin_qq_group_notice
+name: astrbot_plugin_qq_group_admin
+display_name: QQ 官方群管理
+desc: QQ 官方机器人群管理：禁言、入群申请审批、成员进退群通知、分群管理员和 LLM 工具
+short_desc: QQ 官方机器人禁言、入群审批、进退群通知与分群管理员。
+author: yun474
+version: 2.0.0
+repo: https://github.com/yun474/astrbot_plugin_qq_group_admin
 support_platforms:
   - qq_official
   - qq_official_webhook
