@@ -71,7 +71,7 @@ def format_request(item: dict[str, Any], index: int | None = None) -> str:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.0.0",
+    "2.1.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -312,7 +312,7 @@ class QQGroupAdminPlugin(Star):
         yield event.plain_result(result)
 
     @filter.command("禁言")
-    async def mute_command(self, event: AstrMessageEvent, time: str) -> None:
+    async def mute_command(self, event: AstrMessageEvent, time: str = "") -> None:
         """禁言被艾特的成员，时间支持 30秒、10分、2小时、1天。"""
         if not self.config.get("enable_mute_command", True):
             yield event.plain_result("禁言指令已在插件配置中关闭。")
@@ -325,10 +325,14 @@ class QQGroupAdminPlugin(Star):
             return
         targets = self._mentioned_members(event)
         if not targets:
-            yield event.plain_result("请艾特要禁言的成员，例如：/禁言 @用户 10分")
+            yield event.plain_result("请艾特要禁言的成员，例如：/禁言 @用户 [时间]")
             return
         try:
-            time = self._duration_from_command(event, time)
+            time = extract_mute_duration(
+                event.get_message_str(),
+                time,
+                str(self.config.get("default_mute_duration", "10分") or "10分"),
+            )
             seconds = parse_duration(time)
             self._validate_duration(seconds)
             for member_openid in targets:
@@ -387,24 +391,48 @@ class QQGroupAdminPlugin(Star):
         content += "\nAstrBot 管理员默认全局拥有群管权限。"
         yield event.plain_result(content)
 
+    @filter.command("群管帮助")
+    async def group_admin_help(self, event: AstrMessageEvent) -> None:
+        if not self.config.get("enable_group_admin_commands", True):
+            return
+        default_duration = str(
+            self.config.get("default_mute_duration", "10分") or "10分"
+        )
+        yield event.plain_result(
+            "QQ 群管帮助\n"
+            "/禁言 @用户 [时间] - 禁言成员；不填时间默认 "
+            f"{default_duration}\n"
+            "/禁言 @用户 解除 - 解除禁言\n"
+            "/添加群管 @用户 - 添加本群群管（仅 AstrBot 管理员）\n"
+            "/删除群管 @用户 - 删除本群群管（仅 AstrBot 管理员）\n"
+            "/群管列表 - 查看本群群管\n"
+            "/群管帮助 - 显示本帮助\n\n"
+            "时间支持：30秒、10分、2小时、1天2小时；纯数字按分钟。\n"
+            "入群申请：群管回复申请通知发送“同意”或“拒绝 [理由]”即可审批。\n"
+            "AstrBot 管理员默认在所有群拥有群管权限。"
+        )
+
     @filter.llm_tool(name="qq_group_mute_member")
     async def mute_tool(
         self,
         event: AstrMessageEvent,
         member_openid: str,
-        duration: str,
+        duration: str = "",
     ) -> MessageEventResult:
         """禁言或解禁当前 QQ 群的一名普通成员，仅群管可用。
 
         Args:
             member_openid(string): 被操作成员的群成员 OpenID
-            duration(string): 禁言时长，如 30秒、10分、2小时、1天；填 0 或 解除 表示解禁
+            duration(string): 可选禁言时长，如 30秒、10分、2小时、1天；省略时使用插件默认时长，填 0 或 解除表示解禁
         """
         if not self.config.get("enable_mute_tool", True):
             return event.plain_result("QQ 群禁言工具已关闭。")
         if not self._is_qq_group(event) or not self._can_manage(event):
             return event.plain_result("当前场景无权使用 QQ 群禁言工具。")
         try:
+            duration = duration.strip() or str(
+                self.config.get("default_mute_duration", "10分") or "10分"
+            )
             seconds = parse_duration(duration)
             self._validate_duration(seconds)
             await self._mute(event, event.get_group_id(), member_openid, seconds)
@@ -548,13 +576,6 @@ class QQGroupAdminPlugin(Star):
                     targets.append(str(part.qq))
         return targets[:10]
 
-    @staticmethod
-    def _duration_from_command(event: AstrMessageEvent, fallback: str) -> str:
-        text = event.get_message_str().strip()
-        text = re.sub(r"^/?禁言\s*", "", text)
-        text = re.sub(r"<@!?[^>]+>", "", text).strip()
-        return text or fallback
-
     def _validate_duration(self, seconds: int) -> None:
         maximum = max(1, int(self.config.get("max_mute_seconds", 2592000)))
         if seconds < 0 or seconds > maximum:
@@ -589,3 +610,15 @@ def render_member_notice(template: str, member_openid: str, *, can_at: bool) -> 
     else:
         member_value = member_openid or "未知成员"
     return template.replace("{member_at}", member_value)
+
+
+def extract_mute_duration(
+    message_text: str,
+    fallback: str,
+    default_duration: str,
+) -> str:
+    """Extract an optional duration while discarding QQ mention markup."""
+    text = re.sub(r"^/?禁言\s*", "", message_text.strip())
+    text = re.sub(r"<@!?[^>]+>", "", text).strip()
+    fallback = re.sub(r"<@!?[^>]+>", "", fallback).strip()
+    return text or fallback or default_duration.strip() or "10分"

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from astrbot_plugin_qq_group_admin.main import (
+    extract_mute_duration,
     format_request,
     parse_duration,
     render_member_notice,
@@ -12,6 +13,18 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
 class CoreTests(unittest.TestCase):
+    def test_missing_duration_uses_configured_default(self) -> None:
+        self.assertEqual(
+            extract_mute_duration("禁言 <@member-1>", "<@member-1>", "20分"),
+            "20分",
+        )
+
+    def test_explicit_duration_overrides_default(self) -> None:
+        self.assertEqual(
+            extract_mute_duration("禁言 <@member-1> 2小时", "", "20分"),
+            "2小时",
+        )
+
     def test_member_notice_only_renders_at_placeholder(self) -> None:
         text = render_member_notice(
             "欢迎 {member_at}，{member_nickname}",

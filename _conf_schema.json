@@ -9,6 +9,12 @@
     "type": "bool",
     "default": true
   },
+  "default_mute_duration": {
+    "description": "默认禁言时长",
+    "type": "string",
+    "default": "10分",
+    "hint": "执行 /禁言 @用户 时如果不填写时间，则使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。禁言工具省略时长时也使用此值。"
+  },
   "enable_join_notice": {
     "description": "收到入群申请时自动发送到对应群",
     "type": "bool",
@@ -30,7 +36,7 @@
     "default": true
   },
   "enable_group_admin_commands": {
-    "description": "启用 /添加群管、/删除群管、/群管列表 指令",
+    "description": "启用 /添加群管、/删除群管、/群管列表、/群管帮助 指令",
     "type": "bool",
     "default": true
   },
