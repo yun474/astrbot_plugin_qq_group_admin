@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from astrbot.api.message_components import At, Plain
 
@@ -13,6 +15,7 @@ from astrbot_plugin_qq_group_admin.main import (
     format_request,
     parse_duration,
     QQGroupAdminPlugin,
+    GROUP_MEMBER_INTENT,
     render_member_notice,
     resolve_tool_event,
 )
@@ -21,6 +24,75 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
 class CoreTests(unittest.TestCase):
+    def test_group_member_intent_updates_sessions_and_reconnects(self) -> None:
+        class WebSocket:
+            def __init__(self) -> None:
+                self._session = {
+                    "intent": 1,
+                    "session_id": "old-session",
+                    "last_seq": 8,
+                }
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        websocket = WebSocket()
+        pending_session = {"intent": 1}
+        client = SimpleNamespace(
+            intents=1,
+            _connection=SimpleNamespace(_session_list=[pending_session]),
+            _active_websockets={websocket},
+        )
+        platform = SimpleNamespace(intents=SimpleNamespace(value=1))
+        plugin = object.__new__(QQGroupAdminPlugin)
+
+        asyncio.run(plugin._ensure_group_member_intent(platform, client))
+
+        self.assertTrue(client.intents & GROUP_MEMBER_INTENT)
+        self.assertTrue(platform.intents.value & GROUP_MEMBER_INTENT)
+        self.assertTrue(pending_session["intent"] & GROUP_MEMBER_INTENT)
+        self.assertTrue(websocket._session["intent"] & GROUP_MEMBER_INTENT)
+        self.assertEqual(websocket._session["session_id"], "")
+        self.assertEqual(websocket._session["last_seq"], 0)
+        self.assertTrue(websocket.closed)
+
+    def test_join_markdown_failure_falls_back_to_plain_text(self) -> None:
+        api = SimpleNamespace(
+            send_group_markdown=AsyncMock(side_effect=RuntimeError("no markdown")),
+            send_group_text=AsyncMock(return_value={}),
+        )
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_member_join_notice": True,
+            "member_join_message": "欢迎 {member_at} 加入群聊！",
+        }
+        plugin.context = SimpleNamespace(
+            get_platform_inst=lambda platform_id: SimpleNamespace(client=object())
+        )
+
+        with patch(
+            "astrbot_plugin_qq_group_admin.main.QQGroupManageAPI",
+            return_value=api,
+        ):
+            asyncio.run(
+                plugin._handle_member_event(
+                    "platform-1",
+                    "member_join",
+                    {
+                        "group_openid": "group-1",
+                        "member_openid": "member-1",
+                        "_event_id": "event-1",
+                    },
+                )
+            )
+
+        api.send_group_text.assert_awaited_once_with(
+            "group-1",
+            "欢迎 member-1 加入群聊！",
+            event_id="event-1",
+        )
+
     def test_silent_notice_config_never_stops_llm_natural_reply(self) -> None:
         class Event:
             @staticmethod

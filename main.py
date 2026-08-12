@@ -16,6 +16,7 @@ from .storage import PluginStorage
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
 QQ_PLATFORMS = {"qq_official", "qq_official_webhook"}
+GROUP_MEMBER_INTENT = 1 << 24
 ACTION_RE = re.compile(r"^(同意|通过|拒绝|驳回)(?:\s+(.+))?$", re.S)
 TIME_PART_RE = re.compile(r"(\d+)\s*(天|日|小时|时|分钟|分|秒|s|m|h|d)", re.I)
 
@@ -36,6 +37,13 @@ def parse_duration(value: str) -> int:
     if not matches or "".join(match.group(0) for match in matches).replace(" ", "") != text.replace(" ", ""):
         raise ValueError("时间格式错误，可用 30秒、10分、2小时、1天2小时；纯数字按分钟")
     return sum(int(match.group(1)) * units[match.group(2).lower()] for match in matches)
+
+
+def intent_value(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    raw = getattr(value, "value", 0)
+    return raw if isinstance(raw, int) else 0
 
 
 def format_request(item: dict[str, Any], index: int | None = None) -> str:
@@ -158,7 +166,7 @@ def resolve_tool_event(value: Any) -> AstrMessageEvent:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.3.0",
+    "2.3.1",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -207,8 +215,16 @@ class QQGroupAdminPlugin(Star):
                     )
                 }
 
-                async def handler(data: dict[str, Any], pid: str = platform_id) -> None:
+                async def handler(
+                    data: dict[str, Any],
+                    pid: str = platform_id,
+                    original: Any = old_handlers["on_group_join_request"],
+                ) -> None:
                     await self._handle_join_request_event(pid, data)
+                    if original is not None:
+                        result = original(data)
+                        if hasattr(result, "__await__"):
+                            await result
 
                 async def member_add_handler(
                     data: dict[str, Any],
@@ -235,17 +251,14 @@ class QQGroupAdminPlugin(Star):
                 setattr(client, "on_group_join_request", handler)
                 setattr(client, "on_group_member_add", member_add_handler)
                 setattr(client, "on_group_member_remove", member_remove_handler)
-                if meta.name == "qq_official":
-                    intents = getattr(client, "intents", 0)
-                    if isinstance(intents, int) and not intents & (1 << 24):
-                        client.intents = intents | (1 << 24)
-                        logger.info("[%s] 已启用 GROUP_MEMBER Intents（1 << 24）", PLUGIN_NAME)
                 self._patched[platform_id] = {
                     "client": client,
                     "old_handlers": old_handlers,
                     "connections": set(),
                 }
             patch_state = self._patched[platform_id]
+            if meta.name == "qq_official":
+                await self._ensure_group_member_intent(platform, client)
             connections = [getattr(client, "_connection", None)]
             webhook_helper = getattr(platform, "webhook_helper", None)
             connections.append(getattr(webhook_helper, "_connection", None))
@@ -276,12 +289,61 @@ class QQGroupAdminPlugin(Star):
                     "[%s] 已接入 QQ 入群申请与成员进退群事件", PLUGIN_NAME
                 )
 
+    async def _ensure_group_member_intent(self, platform: Any, client: Any) -> None:
+        current = intent_value(getattr(client, "intents", 0))
+        required = current | GROUP_MEMBER_INTENT
+        if current != required:
+            client.intents = required
+            platform_intents = getattr(platform, "intents", None)
+            if hasattr(platform_intents, "value"):
+                platform_intents.value = (
+                    intent_value(platform_intents) | GROUP_MEMBER_INTENT
+                )
+            logger.info("[%s] 已启用 GROUP_MEMBER Intent（1 << 24）", PLUGIN_NAME)
+
+        connection = getattr(client, "_connection", None)
+        pending_sessions = getattr(connection, "_session_list", None) or []
+        for session in pending_sessions:
+            if isinstance(session, dict):
+                session["intent"] = required
+
+        for websocket in list(getattr(client, "_active_websockets", None) or []):
+            session = getattr(websocket, "_session", None)
+            if not isinstance(session, dict):
+                continue
+            if intent_value(session.get("intent", 0)) & GROUP_MEMBER_INTENT:
+                continue
+            session["intent"] = required
+            session["session_id"] = ""
+            session["last_seq"] = 0
+            try:
+                close = getattr(websocket, "close", None)
+                if callable(close):
+                    await close()
+                else:
+                    socket = getattr(websocket, "_conn", None)
+                    if socket is not None and not getattr(socket, "closed", True):
+                        websocket._can_reconnect = False
+                        await socket.close()
+                logger.info(
+                    "[%s] 已重连 QQ WebSocket 以应用 GROUP_MEMBER Intent",
+                    PLUGIN_NAME,
+                )
+            except Exception:
+                logger.exception("[%s] 应用 GROUP_MEMBER Intent 时重连失败", PLUGIN_NAME)
+
     async def _handle_member_event(
         self,
         platform_id: str,
         notice_type: str,
         item: dict[str, Any],
     ) -> None:
+        logger.info(
+            "[%s] 收到 QQ 成员事件：%s，数据：%r",
+            PLUGIN_NAME,
+            notice_type,
+            item,
+        )
         enabled_key = (
             "enable_member_join_notice"
             if notice_type == "member_join"
@@ -316,11 +378,28 @@ class QQGroupAdminPlugin(Star):
         event_id = str(item.get("_event_id") or "") if can_at else ""
         try:
             if can_at and "<qqbot-at-user" in content:
-                await api.send_group_markdown(
-                    group_openid,
-                    content,
-                    event_id=event_id,
-                )
+                try:
+                    await api.send_group_markdown(
+                        group_openid,
+                        content,
+                        event_id=event_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[%s] 进群 Markdown 欢迎发送失败，降级为普通文本",
+                        PLUGIN_NAME,
+                        exc_info=True,
+                    )
+                    fallback = render_member_notice(
+                        template,
+                        member_openid,
+                        can_at=False,
+                    )
+                    await api.send_group_text(
+                        group_openid,
+                        fallback,
+                        event_id=event_id,
+                    )
             else:
                 await api.send_group_text(
                     group_openid,
@@ -333,6 +412,7 @@ class QQGroupAdminPlugin(Star):
     async def _handle_join_request_event(
         self, platform_id: str, item: dict[str, Any]
     ) -> None:
+        logger.info("[%s] 收到 QQ 入群申请事件：%r", PLUGIN_NAME, item)
         if not self.config.get("enable_join_notice", True):
             return
         group_openid = str(item.get("group_openid") or "")

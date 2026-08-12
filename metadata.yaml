@@ -3,7 +3,7 @@ display_name: QQ 官方群管理
 desc: QQ 官方机器人群管理：禁言、入群申请审批、成员进退群通知、分群管理员和 LLM 工具
 short_desc: QQ 官方机器人禁言、入群审批、进退群通知与分群管理员。
 author: yun474
-version: 2.3.0
+version: 2.3.1
 repo: https://github.com/yun474/astrbot_plugin_qq_group_admin
 support_platforms:
   - qq_official

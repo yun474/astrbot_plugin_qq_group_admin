@@ -51,7 +51,7 @@ QQ 官方平台必须满足：
 
 目前 `GROUP_MEMBER_REMOVE` 只提供 `group_openid`、`member_openid`、`op_member_openid` 和时间戳，没有昵称字段。新的群成员列表接口也只有成员 OpenID 与入群时间，且成员退群后已经不在群内，QQ 客户端无法再渲染对他的艾特。因此插件不提供昵称占位符，也不会假装能在退群通知中艾特对方。
 
-WebSocket 模式会补充成员事件所需的 `GROUP_MEMBER` Intent（`1 << 24`）。如果 QQ 连接已经建立后才热重载插件，需要重载 QQ 平台或重启 AstrBot，才能让新的 Intent 生效；Webhook 模式还需在 QQ 开放平台订阅 `GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
+WebSocket 模式会补充成员事件所需的 `GROUP_MEMBER` Intent（`1 << 24`）。如果 QQ 连接已经建立后才热重载插件，插件会同步连接 session，并在需要时自动重新鉴权以应用新 Intent；Webhook 模式还需在 QQ 开放平台订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
 
 ## 指令权限
 
