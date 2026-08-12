@@ -6,24 +6,381 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, Plain, Reply
 
 from astrbot_plugin_qq_group_admin.main import (
     extract_mute_duration,
+    format_apply_source,
     format_group_admin_help,
     format_mute_status,
     format_request,
     parse_duration,
     QQGroupAdminPlugin,
+    GROUP_AND_C2C_INTENT,
     GROUP_MEMBER_INTENT,
+    LIFECYCLE_EVENTS,
+    quoted_join_request_index,
     render_member_notice,
+    review_keyboard,
+    review_action_text,
     resolve_tool_event,
 )
-from astrbot_plugin_qq_group_admin.api import QQBotRoute
+from astrbot_plugin_qq_group_admin.api import QQBotRoute, QQGroupManageAPI
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
+async def _collect_async_generator(generator):
+    return [item async for item in generator]
+
+
 class CoreTests(unittest.TestCase):
+    def test_pending_request_can_be_found_without_reply_message_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = PluginStorage(Path(temp_dir) / "state.json")
+            storage.put_pending(
+                "notification-1",
+                {
+                    "group_openid": "group-1",
+                    "join_request_id": "request-1",
+                },
+            )
+            matched = storage.find_pending_by_join_request_id(
+                "request-1",
+                "group-1",
+            )
+
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched[0], "notification-1")
+        self.assertEqual(matched[1]["join_request_id"], "request-1")
+
+    def test_pending_request_gets_stable_per_group_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = PluginStorage(Path(temp_dir) / "state.json")
+            key, index = storage.reserve_pending(
+                {
+                    "group_openid": "group-1",
+                    "join_request_id": "request-1",
+                }
+            )
+            storage.bind_pending_message(key, "notification-1")
+            matched = storage.find_pending_by_index("group-1", 1)
+
+        self.assertEqual(index, 1)
+        self.assertEqual(matched[0], "notification-1")
+        self.assertEqual(matched[1]["join_request_id"], "request-1")
+
+    def test_group_pending_reset_clears_only_target_group_and_restarts_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = PluginStorage(Path(temp_dir) / "state.json")
+            storage.reserve_pending(
+                {"group_openid": "group-1", "join_request_id": "request-1"}
+            )
+            storage.reserve_pending(
+                {"group_openid": "group-2", "join_request_id": "request-2"}
+            )
+
+            removed = storage.reset_group_pending("group-1")
+            _, restarted_index = storage.reserve_pending(
+                {"group_openid": "group-1", "join_request_id": "request-3"}
+            )
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(restarted_index, 1)
+        self.assertIsNotNone(storage.find_pending_by_index("group-2", 1))
+
+    def test_group_pending_reset_command_checks_permission(self) -> None:
+        class Event:
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @staticmethod
+            def plain_result(text: str) -> str:
+                return text
+
+            @staticmethod
+            def is_admin() -> bool:
+                return False
+
+            @staticmethod
+            def get_sender_id() -> str:
+                return "plugin-group-admin"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot"
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin._is_qq_group = lambda event: True
+        plugin.storage = SimpleNamespace(reset_group_pending=lambda group_id: 99)
+
+        results = asyncio.run(
+            _collect_async_generator(plugin.reset_join_requests(Event()))
+        )
+
+        self.assertEqual(results, ["只有 AstrBot 管理员能重置入群申请编号。"])
+
+    def test_reply_review_uses_only_new_plain_text(self) -> None:
+        reply = Reply(
+            id="",
+            message_str="#1 新的入群申请",
+            chain=[Plain(text="#1 新的入群申请")],
+        )
+
+        class Event:
+            @staticmethod
+            def get_messages():
+                return [reply, At(qq="bot-openid"), Plain(text="同意")]
+
+            @staticmethod
+            def get_message_str() -> str:
+                return "#1 新的入群申请 @bot 同意"
+
+        self.assertEqual(review_action_text(Event()), "同意")
+        self.assertEqual(quoted_join_request_index(reply), 1)
+
+    def test_reply_review_handles_empty_reply_id_and_stops_other_plugins(self) -> None:
+        reply = Reply(
+            id="",
+            message_str="#1 新的入群申请",
+            chain=[Plain(text="#1 新的入群申请")],
+        )
+
+        class Event:
+            stopped = False
+
+            @staticmethod
+            def get_messages():
+                return [reply, At(qq="bot-openid"), Plain(text="同意")]
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @classmethod
+            def stop_event(cls) -> None:
+                cls.stopped = True
+
+            @staticmethod
+            def plain_result(text: str) -> str:
+                return text
+
+        pending = {
+            "group_openid": "group-1",
+            "member_openid": "member-1",
+            "join_request_id": "request-1",
+        }
+        removed = []
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_join_reply_review": True,
+        }
+        plugin.storage = SimpleNamespace(
+            get_pending=lambda message_id: None,
+            find_pending_by_index=lambda group_id, index: (
+                "notification-1",
+                pending,
+            ),
+            find_pending_by_join_request_id=lambda request_id, group_id: None,
+            remove_pending=lambda message_id: removed.append(message_id),
+        )
+        plugin._is_qq_group = lambda event: True
+        plugin._can_manage = lambda event: True
+        plugin._review = AsyncMock(return_value={})
+
+        event = Event()
+
+        async def run_handler():
+            return [item async for item in plugin.reply_review(event)]
+
+        results = asyncio.run(run_handler())
+
+        self.assertTrue(Event.stopped)
+        plugin._review.assert_awaited_once_with(
+            event,
+            "group-1",
+            "member-1",
+            "request-1",
+            True,
+            "",
+        )
+        self.assertEqual(removed, ["notification-1"])
+        self.assertEqual(results, ["已同意入群申请。"])
+
+    def test_index_review_checks_permission_and_stops_other_plugins(self) -> None:
+        class Event:
+            stopped = False
+
+            @staticmethod
+            def get_messages():
+                return [Plain(text="/拒绝 7 测试理由")]
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @classmethod
+            def stop_event(cls) -> None:
+                cls.stopped = True
+
+            @staticmethod
+            def plain_result(text: str) -> str:
+                return text
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_join_reply_review": True,
+        }
+        plugin.storage = SimpleNamespace(
+            find_pending_by_index=lambda group_id, index: (
+                "notification-7",
+                {
+                    "group_openid": "group-1",
+                    "member_openid": "member-1",
+                    "join_request_id": "request-7",
+                },
+            )
+        )
+        plugin._is_qq_group = lambda event: True
+        plugin._can_manage = lambda event: False
+        plugin._review = AsyncMock(return_value={})
+
+        event = Event()
+        results = asyncio.run(
+            _collect_async_generator(plugin.reply_review(event))
+        )
+
+        self.assertTrue(event.stopped)
+        plugin._review.assert_not_awaited()
+        self.assertEqual(
+            results,
+            ["你不是本群群管，也不是 AstrBot 管理员。"],
+        )
+
+    def test_request_notice_hides_ids_and_translates_source(self) -> None:
+        text = format_request(
+            {
+                "username": "测试用户",
+                "member_openid": "member-secret",
+                "join_request_id": "request-secret",
+                "apply_source": "self_apply",
+                "verify_info": {
+                    "method": "verify_message",
+                    "verify_message": "答案",
+                },
+            },
+            3,
+        )
+        self.assertIn("#3 新的入群申请", text)
+        self.assertIn("来源：自主申请", text)
+        self.assertIn("验证消息：答案", text)
+        self.assertNotIn("member-secret", text)
+        self.assertNotIn("request-secret", text)
+        self.assertNotIn("验证方式", text)
+        self.assertEqual(format_apply_source("unknown-value"), "其他来源")
+
+    def test_review_keyboard_uses_commands(self) -> None:
+        keyboard = review_keyboard(4)
+        buttons = keyboard["content"]["rows"][0]["buttons"]
+        self.assertEqual(buttons[0]["action"]["data"], "/同意 4")
+        self.assertEqual(buttons[1]["action"]["data"], "/拒绝 4")
+        self.assertEqual(buttons[0]["action"]["permission"]["type"], 2)
+
+    def test_keyboard_is_attached_to_markdown_payload(self) -> None:
+        api = QQGroupManageAPI(object())
+        api._request = AsyncMock(return_value={"id": "message-1"})
+        keyboard = review_keyboard(2)
+
+        asyncio.run(api.send_group_markdown("group-1", "申请内容", keyboard=keyboard))
+
+        payload = api._request.await_args.kwargs["payload"]
+        self.assertEqual(payload["msg_type"], 2)
+        self.assertEqual(payload["markdown"], {"content": "申请内容"})
+        self.assertIs(payload["keyboard"], keyboard)
+
+    def test_hot_install_patches_existing_connection(self) -> None:
+        dispatched = []
+
+        class Client:
+            intents = GROUP_AND_C2C_INTENT
+            _active_websockets = set()
+
+            def __init__(self) -> None:
+                self._connection = SimpleNamespace(parser={}, _session_list=[])
+
+            @staticmethod
+            def ws_dispatch(event_name, data) -> None:
+                dispatched.append((event_name, data))
+
+        client = Client()
+        platform = SimpleNamespace(
+            client=client,
+            intents=SimpleNamespace(value=GROUP_AND_C2C_INTENT),
+            meta=lambda: SimpleNamespace(name="qq_official", id="platform-1"),
+        )
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {}
+        plugin.context = SimpleNamespace(
+            platform_manager=SimpleNamespace(platform_insts=[platform])
+        )
+        plugin._patched = {}
+
+        asyncio.run(plugin._patch_platforms_once())
+
+        self.assertTrue(set(LIFECYCLE_EVENTS).issubset(client._connection.parser))
+        client._connection.parser["group_member_remove"](
+            {"id": "event-1", "d": {"group_openid": "group-1"}}
+        )
+        self.assertEqual(
+            dispatched,
+            [
+                (
+                    "group_member_remove",
+                    {"group_openid": "group-1", "_event_id": "event-1"},
+                )
+            ],
+        )
+
+    def test_lifecycle_parsers_exist_before_connection_is_created(self) -> None:
+        from botpy.connection import ConnectionState
+
+        attrs = [f"parse_{event_name}" for event_name in LIFECYCLE_EVENTS]
+        originals = {attr: getattr(ConnectionState, attr, None) for attr in attrs}
+        for attr in attrs:
+            if hasattr(ConnectionState, attr):
+                delattr(ConnectionState, attr)
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin._parser_state_class = None
+        plugin._owned_parser_methods = {}
+        captured = []
+        try:
+            plugin._install_parser_patch()
+            state = ConnectionState(
+                lambda event_name, data: captured.append((event_name, data)),
+                api=None,
+            )
+            self.assertTrue(set(LIFECYCLE_EVENTS).issubset(state.parsers))
+
+            state.parsers["group_join_request"](
+                {"id": "event-1", "d": {"group_openid": "group-1"}}
+            )
+            self.assertEqual(
+                captured,
+                [
+                    (
+                        "group_join_request",
+                        {"group_openid": "group-1", "_event_id": "event-1"},
+                    )
+                ],
+            )
+        finally:
+            for attr in attrs:
+                if hasattr(ConnectionState, attr):
+                    delattr(ConnectionState, attr)
+                if originals[attr] is not None:
+                    setattr(ConnectionState, attr, originals[attr])
+
     def test_group_member_intent_updates_sessions_and_reconnects(self) -> None:
         class WebSocket:
             def __init__(self) -> None:
@@ -50,9 +407,13 @@ class CoreTests(unittest.TestCase):
         asyncio.run(plugin._ensure_group_member_intent(platform, client))
 
         self.assertTrue(client.intents & GROUP_MEMBER_INTENT)
+        self.assertTrue(client.intents & GROUP_AND_C2C_INTENT)
         self.assertTrue(platform.intents.value & GROUP_MEMBER_INTENT)
+        self.assertTrue(platform.intents.value & GROUP_AND_C2C_INTENT)
         self.assertTrue(pending_session["intent"] & GROUP_MEMBER_INTENT)
+        self.assertTrue(pending_session["intent"] & GROUP_AND_C2C_INTENT)
         self.assertTrue(websocket._session["intent"] & GROUP_MEMBER_INTENT)
+        self.assertTrue(websocket._session["intent"] & GROUP_AND_C2C_INTENT)
         self.assertEqual(websocket._session["session_id"], "")
         self.assertEqual(websocket._session["last_seq"], 0)
         self.assertTrue(websocket.closed)
@@ -90,8 +451,53 @@ class CoreTests(unittest.TestCase):
         api.send_group_text.assert_awaited_once_with(
             "group-1",
             "欢迎 member-1 加入群聊！",
-            event_id="event-1",
         )
+        api.send_group_markdown.assert_awaited_once_with(
+            "group-1",
+            '欢迎 <qqbot-at-user id="member-1" /> 加入群聊！',
+        )
+
+    def test_join_request_notice_is_sent_as_proactive_message(self) -> None:
+        api = SimpleNamespace(
+            send_group_markdown=AsyncMock(return_value={"id": "msg-1"}),
+            send_group_text=AsyncMock(),
+        )
+        stored = []
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_join_notice": True,
+            "enable_join_reply_review": True,
+        }
+        plugin.context = SimpleNamespace(
+            get_platform_inst=lambda platform_id: SimpleNamespace(client=object())
+        )
+        plugin.storage = SimpleNamespace(
+            reserve_pending=lambda item: (stored.append(item) or ("reserved-1", 1)),
+            bind_pending_message=lambda pending_key, message_id: message_id,
+            remove_pending=lambda pending_key: None,
+        )
+
+        with patch(
+            "astrbot_plugin_qq_group_admin.main.QQGroupManageAPI",
+            return_value=api,
+        ):
+            asyncio.run(
+                plugin._handle_join_request_event(
+                    "platform-1",
+                    {
+                        "group_openid": "group-1",
+                        "member_openid": "member-1",
+                        "join_request_id": "request-1",
+                        "_event_id": "event-1",
+                    },
+                )
+            )
+
+        api.send_group_markdown.assert_awaited_once()
+        api.send_group_text.assert_not_awaited()
+        self.assertNotIn("event_id", api.send_group_markdown.await_args.kwargs)
+        self.assertEqual(stored[0]["join_request_id"], "request-1")
+        self.assertIn("keyboard", api.send_group_markdown.await_args.kwargs)
 
     def test_silent_notice_config_never_stops_llm_natural_reply(self) -> None:
         class Event:

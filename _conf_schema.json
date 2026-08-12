@@ -44,7 +44,7 @@
     "default": true
   },
   "enable_join_reply_review": {
-    "description": "允许群管回复申请通知并发送“同意”或“拒绝 理由”",
+    "description": "允许群管通过申请按钮、编号指令或回复通知进行审批",
     "type": "bool",
     "default": true
   },

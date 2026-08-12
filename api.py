@@ -102,6 +102,7 @@ class QQGroupManageAPI:
         content: str,
         *,
         event_id: str = "",
+        keyboard: dict[str, Any] | None = None,
     ) -> Any:
         group_id = quote(group_openid, safe="")
         payload: dict[str, Any] = {
@@ -111,17 +112,21 @@ class QQGroupManageAPI:
         }
         if event_id:
             payload["event_id"] = event_id
+        if keyboard:
+            payload["keyboard"] = keyboard
         return await self._request(
             "POST",
             f"/v2/groups/{group_id}/messages",
             payload=payload,
         )
+
     async def send_group_markdown(
         self,
         group_openid: str,
         content: str,
         *,
         event_id: str = "",
+        keyboard: dict[str, Any] | None = None,
     ) -> Any:
         group_id = quote(group_openid, safe="")
         payload: dict[str, Any] = {
@@ -131,6 +136,8 @@ class QQGroupManageAPI:
         }
         if event_id:
             payload["event_id"] = event_id
+        if keyboard:
+            payload["keyboard"] = keyboard
         return await self._request(
             "POST",
             f"/v2/groups/{group_id}/messages",

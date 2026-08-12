@@ -10,8 +10,10 @@
 - `qq_group_unmute_member`：提供给大模型的独立群成员解禁工具。
 - `/禁言状态`：查看全员禁言模式、定时/周期规则及当前被禁言成员（含昵称、OpenID 和到期时间）。
 - `qq_group_get_mute_status`：提供给大模型的群禁言状态查询工具。
-- 自动转发 `GROUP_JOIN_REQUEST` 入群申请事件到对应群，展示昵称、申请时间、来源、邀请人、风险提示、验证消息和入群问答等接口实际返回的信息。
-- 群管回复申请通知并发送 `同意`、`通过`、`拒绝` 或 `拒绝 理由` 即可审批。
+- 自动转发 `GROUP_JOIN_REQUEST` 入群申请事件到对应群，展示昵称、申请时间、中文来源、风险提示、验证消息和入群问答等信息。
+- 每条申请按群生成本地编号；群管可点击通知按钮，或发送 `/同意 1`、`/拒绝 1 理由` 审批，也兼容回复通知发送 `同意`、`通过`、`拒绝` 或 `拒绝 理由`。
+- `/群申请归零`：仅 AstrBot 管理员可用；清空当前群的待审映射和编号计数，下一条申请从 `#1` 开始。
+- 审批入口都会再次校验 AstrBot 管理员或本群群管权限。申请通知不会公开成员 OpenID、申请/事件 ID 和验证方式，申请来源会显示为中文。
 - `qq_group_list_join_requests`：拉取当前群入群申请列表。
 - `qq_group_review_join_request`：同意或拒绝指定申请。
 - 普通成员进群时发送欢迎消息，普通成员退群时发送通知。
@@ -51,7 +53,7 @@ QQ 官方平台必须满足：
 
 目前 `GROUP_MEMBER_REMOVE` 只提供 `group_openid`、`member_openid`、`op_member_openid` 和时间戳，没有昵称字段。新的群成员列表接口也只有成员 OpenID 与入群时间，且成员退群后已经不在群内，QQ 客户端无法再渲染对他的艾特。因此插件不提供昵称占位符，也不会假装能在退群通知中艾特对方。
 
-WebSocket 模式会补充成员事件所需的 `GROUP_MEMBER` Intent（`1 << 24`）。如果 QQ 连接已经建立后才热重载插件，插件会同步连接 session，并在需要时自动重新鉴权以应用新 Intent；Webhook 模式还需在 QQ 开放平台订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
+WebSocket 模式会在连接创建前安装三个事件解析器，并确保启用 `GROUP_MEMBER`（`1 << 24`）和 `GROUP_AND_C2C_EVENT`（`1 << 25`）Intents。如果 QQ 连接已经建立后才热重载插件，插件还会同步连接 session，并在需要时自动重新鉴权；Webhook 模式仍需在 QQ 开放平台订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
 
 ## 指令权限
 
@@ -60,7 +62,7 @@ WebSocket 模式会补充成员事件所需的 `GROUP_MEMBER` Intent（`1 << 24`
 | 添加/删除群管 | 是 | 否 | 否 |
 | 查看群管列表 | 是 | 是 | 是 |
 | 禁言/解禁 | 是 | 是 | 否 |
-| 回复审批入群申请 | 是 | 是 | 否 |
+| 按钮、编号指令或回复审批入群申请 | 是 | 是 | 否 |
 | 群管理 LLM 工具 | 是 | 是 | 否 |
 
 分群群管保存的是 QQ 官方接口提供的 `member_openid`，不是公开 QQ 号。
@@ -84,7 +86,7 @@ QQ 当前的禁言状态查询接口会返回全员禁言规则，但对应的�
 - `verify_info.verify_message`
 - `verify_info.review_qa_list[]`：问题与回答
 
-回复审批依靠“申请通知消息 ID → 申请信息”的本地映射，默认保留 30 天，数据位于 AstrBot 的 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。
+审批依靠按群编号和申请通知消息 ID 建立的本地映射，默认保留 30 天，数据位于 AstrBot 的 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。
 
 ## 接口说明
 
