@@ -88,5 +88,3 @@ class PluginStorage:
                 removed = True
         if removed and save:
             self.save()
-
-

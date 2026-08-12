@@ -109,7 +109,6 @@ class QQGroupManageAPI:
             f"/v2/groups/{group_id}/messages",
             payload=payload,
         )
-
     async def send_group_markdown(
         self,
         group_openid: str,
@@ -130,4 +129,3 @@ class QQGroupManageAPI:
             f"/v2/groups/{group_id}/messages",
             payload=payload,
         )
-
