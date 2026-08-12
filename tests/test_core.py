@@ -34,6 +34,75 @@ async def _collect_async_generator(generator):
 
 
 class CoreTests(unittest.TestCase):
+    def test_group_umo_whitelist_empty_means_all_groups(self) -> None:
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {"enabled_group_umos": []}
+
+        self.assertTrue(plugin._umo_enabled("bot-1:GroupMessage:group-1"))
+        self.assertTrue(plugin._umo_enabled("bot-1:GroupMessage:group-2"))
+
+    def test_group_umo_whitelist_allows_only_configured_environments(self) -> None:
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enabled_group_umos": [
+                "bot-1:GroupMessage:group-1",
+                "  bot-1:GroupMessage:group-2  ",
+                "",
+            ],
+        }
+
+        self.assertTrue(plugin._umo_enabled("bot-1:GroupMessage:group-1"))
+        self.assertTrue(plugin._umo_enabled("bot-1:GroupMessage:group-2"))
+        self.assertFalse(plugin._umo_enabled("bot-1:GroupMessage:group-3"))
+
+    def test_message_event_uses_its_exact_umo_for_whitelist(self) -> None:
+        class Event:
+            unified_msg_origin = "bot-1:GroupMessage:group-1"
+
+            @staticmethod
+            def get_platform_name() -> str:
+                return "qq_official"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enabled_group_umos": ["bot-1:GroupMessage:group-1"],
+        }
+
+        self.assertTrue(plugin._is_qq_group(Event()))
+        Event.unified_msg_origin = "bot-2:GroupMessage:group-1"
+        self.assertFalse(plugin._is_qq_group(Event()))
+
+    def test_join_notice_is_silent_outside_group_whitelist(self) -> None:
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_join_notice": True,
+            "enabled_group_umos": ["platform-1:GroupMessage:group-allowed"],
+        }
+        plugin.context = SimpleNamespace(
+            get_platform_inst=lambda platform_id: self.fail(
+                "disabled group must not resolve or send through a platform"
+            )
+        )
+        plugin.storage = SimpleNamespace(
+            reserve_pending=lambda item: self.fail(
+                "disabled group must not create a pending mapping"
+            )
+        )
+
+        asyncio.run(
+            plugin._handle_join_request_event(
+                "platform-1",
+                {
+                    "group_openid": "group-blocked",
+                    "join_request_id": "request-1",
+                },
+            )
+        )
+
     def test_pending_request_can_be_found_without_reply_message_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = PluginStorage(Path(temp_dir) / "state.json")

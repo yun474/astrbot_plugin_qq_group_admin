@@ -264,7 +264,7 @@ def quoted_join_request_index(reply: Reply) -> int | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.3.2",
+    "2.3.3",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -503,6 +503,8 @@ class QQGroupAdminPlugin(Star):
         if not group_openid:
             logger.warning("[%s] 成员事件缺少 group_openid: %r", PLUGIN_NAME, item)
             return
+        if not self._umo_enabled(self._group_umo(platform_id, group_openid)):
+            return
         template_key = (
             "member_join_message"
             if notice_type == "member_join"
@@ -560,6 +562,8 @@ class QQGroupAdminPlugin(Star):
         group_openid = str(item.get("group_openid") or "")
         if not group_openid:
             logger.warning("[%s] 入群申请缺少 group_openid: %r", PLUGIN_NAME, item)
+            return
+        if not self._umo_enabled(self._group_umo(platform_id, group_openid)):
             return
         platform = self.context.get_platform_inst(platform_id)
         if platform is None:
@@ -793,6 +797,9 @@ class QQGroupAdminPlugin(Star):
     async def group_admin_help(self, event: AstrMessageEvent) -> None:
         if not self.config.get("enable_group_admin_commands", True):
             return
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持已启用的 QQ 官方机器人群聊。")
+            return
         default_duration = str(
             self.config.get("default_mute_duration", "1分") or "1分"
         )
@@ -1025,7 +1032,28 @@ class QQGroupAdminPlugin(Star):
         return platform
 
     def _is_qq_group(self, event: AstrMessageEvent) -> bool:
-        return event.get_platform_name() in QQ_PLATFORMS and bool(event.get_group_id())
+        return (
+            event.get_platform_name() in QQ_PLATFORMS
+            and bool(event.get_group_id())
+            and self._umo_enabled(
+                str(getattr(event, "unified_msg_origin", "") or "")
+            )
+        )
+
+    def _umo_enabled(self, umo: str) -> bool:
+        configured = self.config.get("enabled_group_umos", []) or []
+        if isinstance(configured, str):
+            configured = [configured]
+        whitelist = {
+            str(item).strip()
+            for item in configured
+            if str(item).strip()
+        }
+        return not whitelist or umo in whitelist
+
+    @staticmethod
+    def _group_umo(platform_id: str, group_openid: str) -> str:
+        return f"{platform_id}:GroupMessage:{group_openid}"
 
     def _can_manage(self, event: AstrMessageEvent) -> bool:
         return (

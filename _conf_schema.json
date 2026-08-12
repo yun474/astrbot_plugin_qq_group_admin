@@ -1,4 +1,13 @@
 {
+  "enabled_group_umos": {
+    "description": "启用群消息环境白名单（UMO）",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "hint": "留空表示所有 QQ 群启用；在目标群发送 /sid，复制 UMO（形如 平台ID:GroupMessage:群会话ID）并逐项添加。填写后，插件的指令、通知、入群审批和 LLM 工具只在这些消息环境生效。"
+  },
   "enable_mute_command": {
     "description": "启用 /禁言 @用户 [时间] 和 /解禁 @用户 指令",
     "type": "bool",
