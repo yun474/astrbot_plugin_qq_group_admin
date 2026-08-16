@@ -993,6 +993,10 @@ class QQGroupAdminPlugin(Star):
             except Exception as exc:
                 yield event.plain_result(f"保存功能开关失败：{exc}")
                 return
+            yield event.plain_result(
+                f"{feature.name}已{'开启' if enabled else '关闭'}。"
+            )
+            return
 
         values: dict[str, bool] = {}
         group_umo = self._event_group_umo(event) if per_group else ""

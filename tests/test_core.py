@@ -943,8 +943,8 @@ class CoreTests(unittest.TestCase):
                 )
             ]
         )
-        self.assertTrue(results[0].markdown)
-        self.assertIn("禁言成功提示：[已关闭]", results[0].text)
+        self.assertFalse(results[0].markdown)
+        self.assertEqual(results[0].text, "禁言成功提示已关闭。")
 
     def test_astr_admin_global_change_is_saved_to_config(self) -> None:
         class Config(dict):
@@ -1003,7 +1003,7 @@ class CoreTests(unittest.TestCase):
         )
         self.assertFalse(plugin.config["enable_mute_command"])
         self.assertEqual(plugin.config.save_calls, 1)
-        self.assertIn("禁言指令：[已关闭]", results[0].text)
+        self.assertEqual(results[0].text, "禁言指令已关闭。")
 
     def test_non_astr_admin_cannot_change_global_setting(self) -> None:
         class Event:
