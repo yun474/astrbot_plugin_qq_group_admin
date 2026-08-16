@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from inspect import signature
@@ -9,8 +10,10 @@ from unittest.mock import AsyncMock, patch
 from astrbot.api.message_components import At, Plain, Reply
 
 from astrbot_plugin_qq_group_admin.main import (
+    FEATURES,
     extract_mute_duration,
     format_apply_source,
+    format_feature_status,
     format_group_admin_help,
     format_mute_status,
     format_request,
@@ -157,7 +160,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restarted_index, 1)
         self.assertIsNotNone(storage.find_pending_by_index("group-2", 1))
 
-    def test_group_pending_reset_command_checks_permission(self) -> None:
+    def test_plugin_group_admin_can_reset_pending_requests(self) -> None:
         class Event:
             @staticmethod
             def get_group_id() -> str:
@@ -181,13 +184,19 @@ class CoreTests(unittest.TestCase):
 
         plugin = object.__new__(QQGroupAdminPlugin)
         plugin._is_qq_group = lambda event: True
-        plugin.storage = SimpleNamespace(reset_group_pending=lambda group_id: 99)
+        plugin.storage = SimpleNamespace(
+            group_admins=lambda group_id: ["plugin-group-admin"],
+            reset_group_pending=lambda group_id: 99,
+        )
 
         results = asyncio.run(
             _collect_async_generator(plugin.reset_join_requests(Event()))
         )
 
-        self.assertEqual(results, ["只有 AstrBot 管理员能重置入群申请编号。"])
+        self.assertEqual(
+            results,
+            ["已清除本群 99 条待审申请映射；下一条申请将从 #1 开始。"],
+        )
 
     def test_reply_review_uses_only_new_plain_text(self) -> None:
         reply = Reply(
@@ -323,7 +332,7 @@ class CoreTests(unittest.TestCase):
         plugin._review.assert_not_awaited()
         self.assertEqual(
             results,
-            ["你不是本群群管，也不是 AstrBot 管理员。"],
+            ["你没有本群群管权限。"],
         )
 
     def test_request_notice_hides_ids_and_translates_source(self) -> None:
@@ -794,7 +803,7 @@ class CoreTests(unittest.TestCase):
             }
         )
         self.assertIn("测试用户", text)
-        self.assertIn("答案？ / 42", text)
+        self.assertIn("问题：答案？\n答：42", text)
 
     def test_storage_is_scoped_by_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -806,6 +815,352 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.group_admins("group-b"), [])
             reloaded = PluginStorage(path)
             self.assertEqual(reloaded.group_admins("group-a"), ["user-1"])
+
+    def test_group_feature_overrides_use_full_umo_and_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            store = PluginStorage(path)
+            first_umo = "bot-1:GroupMessage:shared-group-openid"
+            second_umo = "bot-2:GroupMessage:shared-group-openid"
+
+            store.set_group_feature_override(
+                first_umo,
+                "enable_mute_command",
+                False,
+            )
+
+            self.assertFalse(
+                store.group_feature_override(first_umo, "enable_mute_command")
+            )
+            self.assertIsNone(
+                store.group_feature_override(second_umo, "enable_mute_command")
+            )
+            reloaded = PluginStorage(path)
+            self.assertFalse(
+                reloaded.group_feature_override(first_umo, "enable_mute_command")
+            )
+
+    def test_per_group_setting_overrides_and_global_mode_ignores_it(self) -> None:
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "scope_settings": {
+                "enable_per_group_feature_settings": True,
+            },
+            "command_settings": {
+                "enable_mute_command": True,
+            },
+        }
+        plugin.storage = SimpleNamespace(
+            group_feature_override=lambda umo, key: (
+                False if umo == "bot-1:GroupMessage:group-1" else None
+            )
+        )
+
+        self.assertFalse(
+            plugin._feature_setting(
+                "enable_mute_command",
+                "bot-1:GroupMessage:group-1",
+            )
+        )
+        self.assertTrue(
+            plugin._feature_setting(
+                "enable_mute_command",
+                "bot-1:GroupMessage:group-2",
+            )
+        )
+
+        plugin.config["scope_settings"]["enable_per_group_feature_settings"] = False
+        self.assertTrue(
+            plugin._feature_setting(
+                "enable_mute_command",
+                "bot-1:GroupMessage:group-1",
+            )
+        )
+
+    def test_feature_status_uses_fill_only_qq_inline_commands(self) -> None:
+        values = {feature.name: True for feature in FEATURES}
+        markdown = format_feature_status(values, per_group=True)
+
+        self.assertIn("当前开关模式：**分群**", markdown)
+        self.assertIn("禁言指令：[已开启]", markdown)
+        self.assertIn("command=%2F%E7%BE%A4%E7%AE%A1%E5%8A%9F%E8%83%BD", markdown)
+        self.assertIn("&enter=false&reply=false", markdown)
+        self.assertNotIn("/群管功能 禁言指令 关闭", markdown)
+
+        global_markdown = format_feature_status(values, per_group=False)
+        self.assertIn("当前开关模式：**全局**", global_markdown)
+        self.assertIn("mqqapi://", global_markdown)
+        self.assertIn("全局模式只有框架管理员允许更改", global_markdown)
+
+    def test_group_feature_command_updates_inverted_notice_setting(self) -> None:
+        class Result:
+            def __init__(self, text: str) -> None:
+                self.text = text
+                self.markdown = False
+
+            def use_markdown(self, enabled: bool):
+                self.markdown = enabled
+                return self
+
+        class Event:
+            unified_msg_origin = "bot-1:GroupMessage:group-1"
+
+            @staticmethod
+            def plain_result(text: str) -> Result:
+                return Result(text)
+
+        overrides = {}
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "scope_settings": {
+                "enable_per_group_feature_settings": True,
+            },
+        }
+        plugin._is_qq_group = lambda event: True
+        plugin._can_manage = lambda event: True
+        plugin.storage = SimpleNamespace(
+            group_feature_override=lambda umo, key: overrides.get((umo, key)),
+            set_group_feature_override=lambda umo, key, value: overrides.__setitem__(
+                (umo, key), value
+            ),
+        )
+
+        results = asyncio.run(
+            _collect_async_generator(
+                plugin.group_feature_settings(
+                    Event(),
+                    "禁言成功提示",
+                    "关闭",
+                )
+            )
+        )
+
+        self.assertTrue(
+            overrides[
+                (
+                    "bot-1:GroupMessage:group-1",
+                    "silent_mute_success_notice",
+                )
+            ]
+        )
+        self.assertTrue(results[0].markdown)
+        self.assertIn("禁言成功提示：[已关闭]", results[0].text)
+
+    def test_astr_admin_global_change_is_saved_to_config(self) -> None:
+        class Config(dict):
+            save_calls = 0
+
+            def save_config(self) -> None:
+                self.save_calls += 1
+
+        class Result:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def use_markdown(self, enabled: bool):
+                return self
+
+        class Event:
+            @staticmethod
+            def plain_result(text: str) -> Result:
+                return Result(text)
+
+            @staticmethod
+            def get_sender_id() -> str:
+                return "astr-admin-1"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def is_admin() -> bool:
+                return True
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = Config(
+            {
+                "scope_settings": {
+                    "enable_per_group_feature_settings": False,
+                },
+                "command_settings": {
+                    "enable_mute_command": True,
+                },
+                "enable_mute_command": True,
+            }
+        )
+        plugin._is_qq_group = lambda event: True
+        plugin._can_manage = lambda event: True
+
+        results = asyncio.run(
+            _collect_async_generator(
+                plugin.group_feature_settings(Event(), "禁言指令", "关闭")
+            )
+        )
+
+        self.assertFalse(
+            plugin.config["command_settings"]["enable_mute_command"]
+        )
+        self.assertFalse(plugin.config["enable_mute_command"])
+        self.assertEqual(plugin.config.save_calls, 1)
+        self.assertIn("禁言指令：[已关闭]", results[0].text)
+
+    def test_non_astr_admin_cannot_change_global_setting(self) -> None:
+        class Event:
+            @staticmethod
+            def plain_result(text: str) -> str:
+                return text
+
+            @staticmethod
+            def get_sender_id() -> str:
+                return "group-admin-1"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def is_admin() -> bool:
+                return False
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "scope_settings": {
+                "enable_per_group_feature_settings": False,
+            },
+        }
+        plugin._is_qq_group = lambda event: True
+        plugin._can_manage = lambda event: True
+
+        results = asyncio.run(
+            _collect_async_generator(
+                plugin.group_feature_settings(Event(), "禁言指令", "关闭")
+            )
+        )
+
+        self.assertEqual(
+            results,
+            ["你没有权限更改配置项，别乱动人家的功能啊！"],
+        )
+
+    def test_native_qq_roles_have_normal_group_management_permission(self) -> None:
+        class Event:
+            message_obj = SimpleNamespace(
+                raw_message=SimpleNamespace(
+                    raw_data={"author": {"member_role": "owner"}}
+                )
+            )
+
+            @staticmethod
+            def get_sender_id() -> str:
+                return "owner-1"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @staticmethod
+            def is_admin() -> bool:
+                return False
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "permission_settings": {
+                "allow_group_owner_manage_plugin_admins": False,
+                "allow_group_admin_manage_plugin_admins": False,
+            }
+        }
+        plugin.storage = SimpleNamespace(group_admins=lambda group_id: [])
+
+        self.assertEqual(plugin._qq_member_role(Event()), "owner")
+        self.assertTrue(plugin._can_manage(Event()))
+        self.assertFalse(plugin._can_manage_plugin_admins(Event()))
+
+        plugin.config["permission_settings"][
+            "allow_group_owner_manage_plugin_admins"
+        ] = True
+        self.assertTrue(plugin._can_manage_plugin_admins(Event()))
+
+    def test_native_admin_role_is_read_from_author_object(self) -> None:
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                raw_message=SimpleNamespace(
+                    author=SimpleNamespace(member_role="admin")
+                )
+            )
+        )
+        self.assertEqual(QQGroupAdminPlugin._qq_member_role(event), "admin")
+
+    def test_plugin_group_admin_cannot_add_other_admins_by_default(self) -> None:
+        class Event:
+            message_obj = SimpleNamespace(
+                raw_message=SimpleNamespace(
+                    raw_data={"author": {"member_role": "member"}}
+                )
+            )
+
+            @staticmethod
+            def get_sender_id() -> str:
+                return "plugin-admin-1"
+
+            @staticmethod
+            def get_self_id() -> str:
+                return "bot-1"
+
+            @staticmethod
+            def get_group_id() -> str:
+                return "group-1"
+
+            @staticmethod
+            def is_admin() -> bool:
+                return False
+
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {}
+        plugin.storage = SimpleNamespace(
+            group_admins=lambda group_id: ["plugin-admin-1"]
+        )
+
+        self.assertTrue(plugin._can_manage(Event()))
+        self.assertFalse(plugin._can_manage_plugin_admins(Event()))
+
+    def test_flat_config_is_migrated_into_grouped_sections(self) -> None:
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "config_layout_version": 0,
+            "enable_mute_command": False,
+            "default_mute_duration": "8分",
+        }
+
+        plugin._migrate_config_layout()
+
+        self.assertEqual(plugin.config["config_layout_version"], 1)
+        self.assertFalse(
+            plugin.config["command_settings"]["enable_mute_command"]
+        )
+        self.assertEqual(
+            plugin.config["command_settings"]["default_mute_duration"],
+            "8分",
+        )
+
+    def test_config_schema_is_grouped_and_new_permissions_default_off(self) -> None:
+        schema_path = Path(__file__).parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["scope_settings"]["type"], "object")
+        self.assertEqual(schema["permission_settings"]["type"], "object")
+        permissions = schema["permission_settings"]["items"]
+        self.assertFalse(
+            permissions["allow_group_owner_manage_plugin_admins"]["default"]
+        )
+        self.assertFalse(
+            permissions["allow_group_admin_manage_plugin_admins"]["default"]
+        )
+        self.assertTrue(schema["enable_mute_command"]["invisible"])
 
 
 if __name__ == "__main__":

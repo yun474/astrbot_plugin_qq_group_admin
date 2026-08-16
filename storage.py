@@ -12,6 +12,7 @@ class PluginStorage:
         self.retention_days = max(1, retention_days)
         self.data: dict[str, Any] = {
             "group_admins": {},
+            "group_feature_overrides": {},
             "pending": {},
             "pending_counters": {},
         }
@@ -28,6 +29,7 @@ class PluginStorage:
             # Keep the plugin usable if a manually edited data file is malformed.
             pass
         self.data.setdefault("group_admins", {})
+        self.data.setdefault("group_feature_overrides", {})
         self.data.setdefault("pending", {})
         self.data.setdefault("pending_counters", {})
         self.prune(save=False)
@@ -62,6 +64,27 @@ class PluginStorage:
         self.data["group_admins"][group_openid] = admins
         self.save()
         return True
+
+    def group_feature_override(self, group_umo: str, key: str) -> bool | None:
+        overrides = self.data["group_feature_overrides"].get(group_umo, {})
+        if not isinstance(overrides, dict):
+            return None
+        value = overrides.get(key)
+        return value if isinstance(value, bool) else None
+
+    def set_group_feature_override(
+        self,
+        group_umo: str,
+        key: str,
+        value: bool,
+    ) -> None:
+        groups = self.data["group_feature_overrides"]
+        overrides = groups.get(group_umo)
+        if not isinstance(overrides, dict):
+            overrides = {}
+        overrides[key] = bool(value)
+        groups[group_umo] = overrides
+        self.save()
 
     def put_pending(self, notification_message_id: str, item: dict[str, Any]) -> None:
         item = dict(item)

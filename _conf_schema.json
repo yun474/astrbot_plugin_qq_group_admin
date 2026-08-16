@@ -1,115 +1,216 @@
 {
-  "enabled_group_umos": {
-    "description": "启用群消息环境白名单（UMO）",
-    "type": "list",
+  "scope_settings": {
+    "description": "① 作用范围与开关模式",
+    "type": "object",
+    "hint": "先决定插件在哪些群生效，再决定所有群共用开关还是分别管理。关闭分群模式不会删除已经保存的各群设置。",
     "items": {
-      "type": "string"
-    },
+      "enabled_group_umos": {
+        "description": "启用群消息环境白名单（UMO）",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空表示所有 QQ 群启用；在目标群发送 /sid，复制 UMO（形如 平台ID:GroupMessage:群会话ID）并逐项添加。白名单优先级最高。"
+      },
+      "enable_per_group_feature_settings": {
+        "description": "开启分群功能管理",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时所有群统一使用本面板中的功能开关，AstrBot 管理员也可通过 /群管功能 修改并写回配置文件；开启后可分别修改当前群，未单独设置的功能继承本面板值。"
+      }
+    }
+  },
+  "permission_settings": {
+    "description": "② 群管权限",
+    "type": "object",
+    "hint": "AstrBot 管理员始终拥有全局权限。插件群管、QQ 群主和 QQ 群管理员可执行普通群管操作；下面两项只控制谁能增删插件群管。",
+    "items": {
+      "allow_group_owner_manage_plugin_admins": {
+        "description": "群主可增删插件群管",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时 QQ 群主不能使用 /添加群管 和 /删除群管，除非他同时是 AstrBot 管理员。"
+      },
+      "allow_group_admin_manage_plugin_admins": {
+        "description": "群管理员可增删插件群管",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时 QQ 原生群管理员不能使用 /添加群管 和 /删除群管，除非他同时是 AstrBot 管理员。"
+      }
+    }
+  },
+  "command_settings": {
+    "description": "③ 群内指令",
+    "type": "object",
+    "hint": "这些是人工在群里发送的管理指令。分群模式开启后，它们也可以由各群的 /群管功能 单独覆盖。",
+    "items": {
+      "enable_mute_command": {
+        "description": "启用禁言与解禁指令",
+        "type": "bool",
+        "default": true,
+        "hint": "控制 /禁言 @用户 [时间] 和 /解禁 @用户。"
+      },
+      "enable_mute_status_command": {
+        "description": "启用禁言状态指令",
+        "type": "bool",
+        "default": true,
+        "hint": "控制 /禁言状态；展示全员禁言规则和当前被禁言成员。"
+      },
+      "enable_group_admin_commands": {
+        "description": "启用群管基础指令",
+        "type": "bool",
+        "default": true,
+        "hint": "控制 /添加群管、/删除群管、/群管列表、/群管帮助；不会关闭 /群管功能，避免分群模式下把控制入口一起锁死。"
+      },
+      "silent_mute_success_notice": {
+        "description": "关闭禁言和解禁的固定成功提示",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后不直接发送“已禁言/已解禁”，错误仍会提示。/群管功能 中会以更直观的“禁言成功提示”显示相反状态。LLM 自然回复不受影响。"
+      },
+      "default_mute_duration": {
+        "description": "默认禁言时长",
+        "type": "string",
+        "default": "1分",
+        "hint": "执行 /禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
+      }
+    }
+  },
+  "join_request_settings": {
+    "description": "④ 入群申请",
+    "type": "object",
+    "hint": "控制申请通知、群内审批入口和本地待审映射。",
+    "items": {
+      "enable_join_notice": {
+        "description": "自动发送入群申请通知",
+        "type": "bool",
+        "default": true
+      },
+      "enable_join_reply_review": {
+        "description": "启用群内申请审批",
+        "type": "bool",
+        "default": true,
+        "hint": "允许群管通过通知按钮、编号指令或回复通知审批申请。"
+      },
+      "join_request_page_size": {
+        "description": "申请列表工具默认拉取条数（1-100）",
+        "type": "int",
+        "default": 20
+      },
+      "pending_retention_days": {
+        "description": "待审通知映射保留天数",
+        "type": "int",
+        "default": 30
+      }
+    }
+  },
+  "member_notice_settings": {
+    "description": "⑤ 成员进退群通知",
+    "type": "object",
+    "hint": "开关可按群覆盖，消息模板仍由所有群共用。模板只支持 {member_at}。",
+    "items": {
+      "enable_member_join_notice": {
+        "description": "启用成员进群欢迎消息",
+        "type": "bool",
+        "default": true,
+        "hint": "处理 GROUP_MEMBER_ADD；{member_at} 会真正艾特新成员。"
+      },
+      "member_join_message": {
+        "description": "成员进群欢迎模板",
+        "type": "text",
+        "default": "欢迎 {member_at} 加入群聊！",
+        "hint": "唯一支持的占位符是 {member_at}。"
+      },
+      "enable_member_leave_notice": {
+        "description": "启用成员退群通知",
+        "type": "bool",
+        "default": true,
+        "hint": "处理 GROUP_MEMBER_REMOVE。QQ 退群事件不提供昵称，成员退出后也无法再艾特。"
+      },
+      "member_leave_message": {
+        "description": "成员退群通知模板",
+        "type": "text",
+        "default": "有成员退出了群聊。",
+        "hint": "{member_at} 只会显示成员 OpenID；退群后 QQ 无法真正艾特。"
+      }
+    }
+  },
+  "llm_tool_settings": {
+    "description": "⑥ LLM 群管工具",
+    "type": "object",
+    "hint": "只控制模型能否调用对应工具。工具以机器人自身权限执行，结果交回模型继续自然回复。",
+    "items": {
+      "enable_mute_tool": {
+        "description": "启用 LLM 群禁言工具",
+        "type": "bool",
+        "default": true
+      },
+      "enable_unmute_tool": {
+        "description": "启用 LLM 群解禁工具",
+        "type": "bool",
+        "default": true
+      },
+      "enable_mute_status_tool": {
+        "description": "启用 LLM 禁言状态查询工具",
+        "type": "bool",
+        "default": true
+      },
+      "enable_join_list_tool": {
+        "description": "启用 LLM 入群申请列表工具",
+        "type": "bool",
+        "default": true
+      },
+      "enable_join_review_tool": {
+        "description": "启用 LLM 入群申请审批工具",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "limit_settings": {
+    "description": "⑦ 安全限制",
+    "type": "object",
+    "hint": "限制接口参数范围，不参与分群开关。",
+    "items": {
+      "max_mute_seconds": {
+        "description": "单次禁言允许的最长秒数",
+        "type": "int",
+        "default": 2592000,
+        "hint": "默认 2592000 秒，即 30 天。"
+      }
+    }
+  },
+  "config_layout_version": {
+    "description": "配置布局版本",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
+  "enabled_group_umos": {
+    "description": "旧版：群环境白名单",
+    "type": "list",
+    "items": { "type": "string" },
     "default": [],
-    "hint": "留空表示所有 QQ 群启用；在目标群发送 /sid，复制 UMO（形如 平台ID:GroupMessage:群会话ID）并逐项添加。填写后，插件的指令、通知、入群审批和 LLM 工具只在这些消息环境生效。"
+    "invisible": true
   },
-  "enable_mute_command": {
-    "description": "启用 /禁言 @用户 [时间] 和 /解禁 @用户 指令",
-    "type": "bool",
-    "default": true
-  },
-  "silent_mute_success_notice": {
-    "description": "关闭禁言和解禁的固定成功通知",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，/禁言、/解禁成功时插件不直接发送“已禁言/已解禁”；错误仍会提示。LLM 工具始终把结果交回模型继续自然回复，不受此开关影响。"
-  },
-  "enable_mute_tool": {
-    "description": "启用给大模型使用的 QQ 群禁言工具",
-    "type": "bool",
-    "default": true,
-    "hint": "工具以机器人自身权限执行，只把执行结果交回 LLM 继续自然语言回复，不直接发送固定成功通知。"
-  },
-  "enable_unmute_tool": {
-    "description": "启用给大模型使用的 QQ 群解禁工具",
-    "type": "bool",
-    "default": true
-  },
-  "enable_mute_status_command": {
-    "description": "启用 /禁言状态 指令",
-    "type": "bool",
-    "default": true,
-    "hint": "展示全员禁言模式、定时/周期规则和当前被禁言成员。机器人需要拥有 QQ 群管理员身份。"
-  },
-  "enable_mute_status_tool": {
-    "description": "启用给大模型使用的 QQ 群禁言状态查询工具",
-    "type": "bool",
-    "default": true
-  },
-  "default_mute_duration": {
-    "description": "默认禁言时长",
-    "type": "string",
-    "default": "1分",
-    "hint": "执行 /禁言 @用户 时如果不填写时间，则使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。禁言工具省略时长时也使用此值。"
-  },
-  "enable_join_notice": {
-    "description": "收到入群申请时自动发送到对应群",
-    "type": "bool",
-    "default": true
-  },
-  "enable_join_reply_review": {
-    "description": "允许群管通过申请按钮、编号指令或回复通知进行审批",
-    "type": "bool",
-    "default": true
-  },
-  "enable_join_list_tool": {
-    "description": "启用给大模型使用的入群申请列表工具",
-    "type": "bool",
-    "default": true
-  },
-  "enable_join_review_tool": {
-    "description": "启用给大模型使用的入群申请审批工具",
-    "type": "bool",
-    "default": true
-  },
-  "enable_group_admin_commands": {
-    "description": "启用 /添加群管、/删除群管、/群管列表、/群管帮助 指令",
-    "type": "bool",
-    "default": true,
-    "hint": "/群管帮助优先使用 QQ Markdown 发送；平台不支持时由 AstrBot 自动降级为纯文本。"
-  },
-  "enable_member_join_notice": {
-    "description": "启用成员进群欢迎消息",
-    "type": "bool",
-    "default": true,
-    "hint": "处理 GROUP_MEMBER_ADD。消息模板只支持 {member_at}，它会真正艾特新成员。"
-  },
-  "member_join_message": {
-    "description": "成员进群欢迎模板",
-    "type": "text",
-    "default": "欢迎 {member_at} 加入群聊！",
-    "hint": "唯一支持的占位符是 {member_at}。"
-  },
-  "enable_member_leave_notice": {
-    "description": "启用成员退群通知",
-    "type": "bool",
-    "default": true,
-    "hint": "处理 GROUP_MEMBER_REMOVE。QQ 退群事件不提供昵称，成员退出后也无法再艾特。"
-  },
-  "member_leave_message": {
-    "description": "成员退群通知模板",
-    "type": "text",
-    "default": "有成员退出了群聊。",
-    "hint": "只识别 {member_at}，但退群后 QQ 无法真正艾特，该占位符只会显示成员 OpenID；退群事件没有昵称字段。"
-  },
-  "max_mute_seconds": {
-    "description": "单次禁言允许的最长秒数，默认 30 天",
-    "type": "int",
-    "default": 2592000
-  },
-  "join_request_page_size": {
-    "description": "入群申请列表工具默认拉取条数（1-100）",
-    "type": "int",
-    "default": 20
-  },
-  "pending_retention_days": {
-    "description": "本地保留申请通知与回复映射的天数",
-    "type": "int",
-    "default": 30
-  }
+  "enable_mute_command": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "silent_mute_success_notice": { "description": "旧版配置", "type": "bool", "default": false, "invisible": true },
+  "enable_mute_tool": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_unmute_tool": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_mute_status_command": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_mute_status_tool": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "default_mute_duration": { "description": "旧版配置", "type": "string", "default": "1分", "invisible": true },
+  "enable_join_notice": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_join_reply_review": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_join_list_tool": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_join_review_tool": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_group_admin_commands": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "enable_member_join_notice": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "member_join_message": { "description": "旧版配置", "type": "text", "default": "欢迎 {member_at} 加入群聊！", "invisible": true },
+  "enable_member_leave_notice": { "description": "旧版配置", "type": "bool", "default": true, "invisible": true },
+  "member_leave_message": { "description": "旧版配置", "type": "text", "default": "有成员退出了群聊。", "invisible": true },
+  "max_mute_seconds": { "description": "旧版配置", "type": "int", "default": 2592000, "invisible": true },
+  "join_request_page_size": { "description": "旧版配置", "type": "int", "default": 20, "invisible": true },
+  "pending_retention_days": { "description": "旧版配置", "type": "int", "default": 30, "invisible": true }
 }
