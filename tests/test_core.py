@@ -535,6 +535,46 @@ class CoreTests(unittest.TestCase):
             '欢迎 <qqbot-at-user id="member-1" /> 加入群聊！',
         )
 
+    def test_avatar_markdown_failure_removes_avatar_placeholder(self) -> None:
+        api = SimpleNamespace(
+            send_group_markdown=AsyncMock(side_effect=RuntimeError("no markdown")),
+            send_group_text=AsyncMock(return_value={}),
+        )
+        plugin = object.__new__(QQGroupAdminPlugin)
+        plugin.config = {
+            "enable_member_join_notice": True,
+            "member_join_message": "{member_avatar}\n欢迎加入群聊！",
+        }
+        plugin.context = SimpleNamespace(
+            get_platform_inst=lambda platform_id: SimpleNamespace(
+                appid="bot-1",
+                client=object(),
+            )
+        )
+
+        with patch(
+            "astrbot_plugin_qq_group_admin.main.QQGroupManageAPI",
+            return_value=api,
+        ):
+            asyncio.run(
+                plugin._handle_member_event(
+                    "platform-1",
+                    "member_join",
+                    {
+                        "group_openid": "group-1",
+                        "member_openid": "member-secret",
+                    },
+                )
+            )
+
+        api.send_group_text.assert_awaited_once_with("group-1", "欢迎加入群聊！")
+        api.send_group_markdown.assert_awaited_once_with(
+            "group-1",
+            "![头像 #100px #100px]"
+            "(https://q.qlogo.cn/qqapp/bot-1/member-secret/640)\n"
+            "欢迎加入群聊！",
+        )
+
     def test_join_request_notice_is_sent_as_proactive_message(self) -> None:
         api = SimpleNamespace(
             send_group_markdown=AsyncMock(return_value={"id": "msg-1"}),
@@ -769,11 +809,17 @@ class CoreTests(unittest.TestCase):
 
     def test_leave_notice_cannot_at(self) -> None:
         text = render_member_notice(
-            "{member_at} 退出了群聊",
+            "{member_avatar}\n{member_at} 退出了群聊",
             "member-1",
             can_at=False,
+            appid="bot-1",
         )
-        self.assertEqual(text, "member-1 退出了群聊")
+        self.assertEqual(
+            text,
+            "![头像 #100px #100px]"
+            "(https://q.qlogo.cn/qqapp/bot-1/member-1/640)\n"
+            "member-1 退出了群聊",
+        )
         self.assertNotIn("qqbot-at-user", text)
 
     def test_new_openapi_domain(self) -> None:

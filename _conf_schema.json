@@ -108,19 +108,19 @@
   "member_notice_settings": {
     "description": "⑤ 成员进退群通知",
     "type": "object",
-    "hint": "开关可按群覆盖，消息模板仍由所有群共用。模板只支持 {member_at}。",
+    "hint": "开关可按群覆盖，消息模板仍由所有群共用。支持 {member_at} 和 {member_avatar}。",
     "items": {
       "enable_member_join_notice": {
         "description": "启用成员进群欢迎消息",
         "type": "bool",
         "default": true,
-        "hint": "处理 GROUP_MEMBER_ADD；{member_at} 会真正艾特新成员。"
+        "hint": "处理 GROUP_MEMBER_ADD；{member_at} 会真正艾特新成员，{member_avatar} 会显示头像。"
       },
       "member_join_message": {
         "description": "成员进群欢迎模板",
         "type": "text",
         "default": "欢迎 {member_at} 加入群聊！",
-        "hint": "唯一支持的占位符是 {member_at}。"
+        "hint": "支持 {member_at} 和 {member_avatar}。"
       },
       "enable_member_leave_notice": {
         "description": "启用成员退群通知",
@@ -132,7 +132,7 @@
         "description": "成员退群通知模板",
         "type": "text",
         "default": "有成员退出了群聊。",
-        "hint": "{member_at} 只会显示成员 OpenID；退群后 QQ 无法真正艾特。"
+        "hint": "{member_at} 只会显示成员 OpenID；{member_avatar} 仍可显示头像。"
       }
     }
   },

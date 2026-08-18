@@ -40,20 +40,22 @@ QQ 官方平台必须满足：
 
 ## 成员进退群通知
 
-成员进群欢迎和退群通知分别提供开关与消息模板。为避免一堆实际上拿不到稳定数据的假占位符，模板只支持一个占位符：
+成员进群欢迎和退群通知分别提供开关与消息模板。模板支持以下占位符：
 
 | 占位符 | 进群事件 | 退群事件 |
 |---|---|---|
 | `{member_at}` | 生成 `<qqbot-at-user>`，通过 QQ Markdown 真正艾特新成员 | 仅显示成员 OpenID，无法艾特 |
+| `{member_avatar}` | 根据成员 OpenID 显示 100×100 头像 | 根据成员 OpenID 显示 100×100 头像 |
 
 推荐配置：
 
 ```text
 成员进群：欢迎 {member_at} 加入群聊！
-成员退群：有成员退出了群聊。
+成员退群：{member_avatar}
+有成员退出了群聊。
 ```
 
-目前 `GROUP_MEMBER_REMOVE` 只提供 `group_openid`、`member_openid`、`op_member_openid` 和时间戳，没有昵称字段。新的群成员列表接口也只有成员 OpenID 与入群时间，且成员退群后已经不在群内，QQ 客户端无法再渲染对他的艾特。因此插件不提供昵称占位符，也不会假装能在退群通知中艾特对方。
+目前 `GROUP_MEMBER_REMOVE` 不提供昵称字段，成员退群后 QQ 客户端也无法再渲染对他的艾特，因此插件不提供昵称占位符。`{member_avatar}` 会使用机器人 AppID 和事件中的成员 OpenID 生成 QQ 头像地址，并通过 Markdown 图片显示；头像无法显示时该占位符为空。
 
 WebSocket 模式会在连接创建前安装三个事件解析器，并确保启用 `GROUP_MEMBER`（`1 << 24`）和 `GROUP_AND_C2C_EVENT`（`1 << 25`）Intents。如果 QQ 连接已经建立后才热重载插件，插件还会同步连接 session，并在需要时自动重新鉴权；Webhook 模式仍需在 QQ 开放平台订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
 

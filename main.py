@@ -373,7 +373,7 @@ def quoted_join_request_index(reply: Reply) -> int | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.4.0",
+    "2.5.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -629,14 +629,21 @@ class QQGroupAdminPlugin(Star):
         template = str(self._config(template_key, default) or "").strip()
         if not template:
             return
-        can_at = notice_type == "member_join"
-        content = render_member_notice(template, member_openid, can_at=can_at)
         platform = self.context.get_platform_inst(platform_id)
         if platform is None:
             return
+        can_at = notice_type == "member_join"
+        content = render_member_notice(
+            template,
+            member_openid,
+            can_at=can_at,
+            appid=str(getattr(platform, "appid", "") or ""),
+        )
+        if not content.strip():
+            return
         api = QQGroupManageAPI(platform.client)
         try:
-            if can_at and "<qqbot-at-user" in content:
+            if "<qqbot-at-user" in content or "![头像 #" in content:
                 try:
                     await api.send_group_markdown(
                         group_openid,
@@ -644,7 +651,7 @@ class QQGroupAdminPlugin(Star):
                     )
                 except Exception:
                     logger.warning(
-                        "[%s] 进群 Markdown 欢迎发送失败，降级为普通文本",
+                        "[%s] 成员通知 Markdown 发送失败，降级为普通文本",
                         PLUGIN_NAME,
                         exc_info=True,
                     )
@@ -652,11 +659,9 @@ class QQGroupAdminPlugin(Star):
                         template,
                         member_openid,
                         can_at=False,
-                    )
-                    await api.send_group_text(
-                        group_openid,
-                        fallback,
-                    )
+                    ).strip()
+                    if fallback:
+                        await api.send_group_text(group_openid, fallback)
             else:
                 await api.send_group_text(
                     group_openid,
@@ -1434,13 +1439,28 @@ class QQGroupAdminPlugin(Star):
         self._parser_state_class = None
 
 
-def render_member_notice(template: str, member_openid: str, *, can_at: bool) -> str:
-    """Render the only supported notice placeholder: {member_at}."""
+def render_member_notice(
+    template: str,
+    member_openid: str,
+    *,
+    can_at: bool,
+    appid: str = "",
+) -> str:
+    """Render member placeholders for lifecycle notices."""
     if can_at and member_openid:
         member_value = f'<qqbot-at-user id="{member_openid}" />'
     else:
         member_value = member_openid or "未知成员"
-    return template.replace("{member_at}", member_value)
+    avatar_value = ""
+    if appid and member_openid:
+        avatar_url = (
+            "https://q.qlogo.cn/qqapp/"
+            f"{quote(appid, safe='')}/{quote(member_openid, safe='')}/640"
+        )
+        avatar_value = f"![头像 #100px #100px]({avatar_url})"
+    return template.replace("{member_at}", member_value).replace(
+        "{member_avatar}", avatar_value
+    )
 
 
 def extract_mute_duration(
