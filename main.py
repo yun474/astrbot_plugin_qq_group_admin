@@ -373,7 +373,7 @@ def quoted_join_request_index(reply: Reply) -> int | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.5.0",
+    "2.4.1",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
