@@ -175,14 +175,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             {"member_openid": "someone-else", "member_role": "owner"},
             {"member_openid": "member", "member_role": "unknown"},
         ):
-            self.now += 30
+            self.now += 120
             self.api.get_group_member_info.return_value = result
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
             )
             self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
         for error in (RuntimeError("11253: no API permission"), TimeoutError()):
-            self.now += 30
+            self.now += 120
             self.api.get_group_member_info.side_effect = error
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
@@ -257,7 +257,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.api.review_join_request.assert_awaited_once()
         self.api.get_group_member_info.assert_not_awaited()
 
-    async def test_denied_spam_uses_native_popup_without_more_queries_or_messages(self):
+    async def test_denied_clicks_return_code_four_for_two_minutes_without_requery(self):
         self.api.get_group_member_info.return_value = {
             "member_openid": "member",
             "member_role": "member",
@@ -270,7 +270,13 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.api.get_group_member_info.assert_awaited_once()
         self.api.review_join_request.assert_not_awaited()
         self.api.send_group_text.assert_not_awaited()
-        self.now += 30
+        self.now += 119
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.get_group_member_info.assert_awaited_once()
+        self.now += 1
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="member")
         )
@@ -303,15 +309,13 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
         self.api.get_group_member_info.assert_awaited_once()
 
-    async def test_query_budget_rejects_many_users_but_keeps_assigned_admin_access(
-        self,
-    ):
+    async def test_more_than_twenty_users_can_be_checked_in_one_minute(self):
         for i in range(25):
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender=f"member-{i}")
             )
-        self.assertEqual(self.api.get_group_member_info.await_count, 20)
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+        self.assertEqual(self.api.get_group_member_info.await_count, 25)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
         self.api.send_group_text.assert_not_awaited()
         await self.plugin._handle_review_interaction("p", self.interaction())
         self.api.review_join_request.assert_awaited_once()

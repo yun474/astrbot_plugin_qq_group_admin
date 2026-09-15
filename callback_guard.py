@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from time import monotonic
 
 
@@ -8,9 +8,7 @@ class ReviewCallbackGuard:
     """Bound callback work without caching successful authorization."""
 
     USER_COOLDOWN = 2
-    DENIED_TTL = 30
-    LOOKUP_WINDOW = 60
-    LOOKUP_LIMIT = 20
+    DENIED_TTL = 120
     LOOKUP_CONCURRENCY = 2
     CACHE_LIMIT = 2048
     ERROR_LOG_INTERVAL = 60
@@ -18,7 +16,6 @@ class ReviewCallbackGuard:
     def __init__(self) -> None:
         self._cooldowns: OrderedDict[tuple[str, ...], float] = OrderedDict()
         self._denied: OrderedDict[tuple[str, ...], float] = OrderedDict()
-        self._lookups: deque[float] = deque()
         self._active_lookups = 0
         self._next_error_log: dict[str, float] = {}
 
@@ -59,16 +56,9 @@ class ReviewCallbackGuard:
         self._remember(self._denied, (platform, group, sender), self.DENIED_TTL)
 
     def start_lookup(self) -> bool:
-        now = monotonic()
-        while self._lookups and self._lookups[0] <= now - self.LOOKUP_WINDOW:
-            self._lookups.popleft()
         # Reject excess work immediately; do not queue requests behind a semaphore.
-        if (
-            len(self._lookups) >= self.LOOKUP_LIMIT
-            or self._active_lookups >= self.LOOKUP_CONCURRENCY
-        ):
+        if self._active_lookups >= self.LOOKUP_CONCURRENCY:
             return False
-        self._lookups.append(now)
         self._active_lookups += 1
         return True
 

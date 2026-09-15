@@ -33,27 +33,22 @@ class CallbackGuardTests(unittest.TestCase):
             self.guard.remember_denied("p", "g", str(i))
         self.assertLessEqual(len(self.guard._cooldowns), 2048)
         self.assertLessEqual(len(self.guard._denied), 2048)
-        self.now += 30
+        self.now += 120
         self.guard.check_click("p", "g", "new-user", assigned_admin=False)
         self.assertEqual(len(self.guard._cooldowns), 1)
         self.assertFalse(self.guard._denied)
 
-    def test_lookup_budget_uses_a_rolling_window_and_recovers(self):
-        for _ in range(10):
+    def test_lookup_has_no_per_minute_quota_but_still_limits_concurrency(self):
+        for _ in range(100):
             self.assertTrue(self.guard.start_lookup())
             self.guard.finish_lookup()
-        self.now += 30
-        for _ in range(10):
-            self.assertTrue(self.guard.start_lookup())
-            self.guard.finish_lookup()
+        self.assertTrue(self.guard.start_lookup())
+        self.assertTrue(self.guard.start_lookup())
         self.assertFalse(self.guard.start_lookup())
-        self.now += 29
-        self.assertFalse(self.guard.start_lookup())
-        self.now += 1
-        for _ in range(10):
-            self.assertTrue(self.guard.start_lookup())
-            self.guard.finish_lookup()
-        self.assertFalse(self.guard.start_lookup())
+        self.guard.finish_lookup()
+        self.assertTrue(self.guard.start_lookup())
+        self.guard.finish_lookup()
+        self.guard.finish_lookup()
 
 
 if __name__ == "__main__":
