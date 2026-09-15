@@ -96,6 +96,14 @@ class QQGroupManageAPI:
             payload=payload,
         )
 
+    async def acknowledge_interaction(self, interaction_id: str, code: int = 0) -> Any:
+        """End the QQ callback button's loading state (0=accepted, 4=denied)."""
+        return await self._request(
+            "PUT",
+            f"/interactions/{quote(interaction_id, safe='')}",
+            payload={"code": code},
+        )
+
     async def send_group_text(
         self,
         group_openid: str,

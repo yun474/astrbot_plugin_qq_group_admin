@@ -1,132 +1,160 @@
-# QQ Group Admin
+<div align="center">
 
-面向 AstrBot 的 QQ 官方机器人群管理插件，直接适配 2026-08 新增的群禁言和入群申请接口。
+# 🛡️ QQ 官方群管理
 
-## 功能
+**入群有人迎，申请点一下，群聊管理轻松一点。**
 
-- `/禁言 @用户 [时间]`：时间可省略并使用配置中的默认禁言时长；支持 `30秒`、`10分`、`2小时`、`1天2小时`，纯数字按分钟，`0`、`解除`、`解禁`用于解除禁言。
-- `/解禁 @用户`：解除一个或多个被艾特成员的禁言，与 `/禁言 @用户 解除` 等效。
-- `qq_group_mute_member`：提供给大模型的群成员禁言/解禁工具。
-- `qq_group_unmute_member`：提供给大模型的独立群成员解禁工具。
-- `/禁言状态`：查看全员禁言模式、定时/周期规则及当前被禁言成员（含昵称、OpenID 和到期时间）。
-- `qq_group_get_mute_status`：提供给大模型的群禁言状态查询工具。
-- 自动转发 `GROUP_JOIN_REQUEST` 入群申请事件到对应群，展示昵称、申请时间、中文来源、风险提示、验证消息和入群问答等信息。
-- 每条申请按群生成本地编号；群管可点击通知按钮，或发送 `/同意 1`、`/拒绝 1 理由` 审批，也兼容回复通知发送 `同意`、`通过`、`拒绝` 或 `拒绝 理由`。
-- `/群申请归零`：清空当前群的待审映射和编号计数，下一条申请从 `#1` 开始。
-- 审批入口都会再次校验 AstrBot 管理员、当前群插件群管或 QQ 原生群主/管理员权限。申请通知不会公开成员 OpenID、申请/事件 ID 和验证方式，申请来源会显示为中文。
-- `qq_group_list_join_requests`：拉取当前群入群申请列表。
-- `qq_group_review_join_request`：同意或拒绝指定申请。
-- 普通成员进群时发送欢迎消息，普通成员退群时发送通知。
-- `/添加群管 @用户`、`/删除群管 @用户`、`/群管列表`、`/群管帮助`：插件群管按群保存；AstrBot 管理员默认全局可用。
-- `/群管功能`：显示当前开关模式和全部功能状态。状态是 QQ Markdown 蓝链，点击只会把相反操作填入输入框，不会自动发送；全局模式仅 AstrBot 管理员有权执行修改。
-- 所有主要指令、通知和 LLM 工具均有配置开关；开启“分群功能管理”后，每个群可以单独覆盖各项布尔开关，未设置项继续继承面板中的全局值。
-- `enabled_group_umos` 可配置启用群消息环境白名单；列表留空时所有群生效。在目标群发送 `/sid`，将显示的 UMO（形如 `平台ID:GroupMessage:群会话ID`）逐项填入后，整个插件只在这些消息环境生效。
+✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 · WebSocket / Webhook ✨
 
-LLM 群管工具以机器人自身权限调用 QQ 接口。工具本身不直接发送固定成功通知，而是始终把执行结果交回 LLM，让 Agent Loop 继续并由模型自然回复。开启 `silent_mute_success_notice` 后，仅关闭 `/禁言`、`/解禁` 指令直接产生的“已禁言/已解禁”消息；错误提示和 LLM 自然回复不受影响。
+[![版本 2.6.0](https://img.shields.io/badge/版本-2.6.0-89b4fa.svg)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-a3be8c.svg)](LICENSE)
+[![作者 yun474](https://img.shields.io/badge/作者-yun474-f5b7c7.svg)](https://github.com/yun474)
 
-插件兼容 AstrBot 4.26.0 的 `ContextWrapper` 工具调用上下文，同时保留旧版直接传入消息事件的调用方式。
+<img src="https://count.getloli.com/@yun474_qq_group_admin?name=yun474_qq_group_admin&amp;theme=booru-lewd&amp;padding=7&amp;offset=0&amp;align=top&amp;scale=1&amp;pixelated=1&amp;darkmode=auto" alt="访问计数" />
 
-`/禁言` 不依赖 AstrBot 的位置参数绑定，而是从消息组件和文本中自行识别目标与时长。它兼容人工艾特以及 LLM Executor 生成的 At 组件、`@member_openid` 文本，不限制 AstrBot 版本。
+[功能亮点](#features) · [安装使用](#usage) · [入群审批](#review) · [权限配置](#permissions) · [进退群通知](#notices)
 
-## 安装
+</div>
 
-把整个 `astrbot_plugin_qq_group_admin` 目录放入 AstrBot 的 `data/plugins/`，然后重载插件或重启 AstrBot。插件不需要额外 Python 依赖。
+---
 
-QQ 官方平台必须满足：
+<a id="features"></a>
 
-1. 使用 `qq_official` 或 `qq_official_webhook` 适配器并启用群/C2C 事件。
-2. 机器人已被设置为目标 QQ 群的管理员。
-3. 机器人账号已获开放平台对应接口权限；否则 QQ 会返回无权限错误。
+## ✨ 群里的小帮手
 
-## 成员进退群通知
+| | 功能 |
+| --- | --- |
+| 🔇 **禁言与解禁** | 多成员操作、组合时长、默认时长与禁言状态查询 |
+| 📨 **入群审批** | Markdown 申请卡片，回调按钮一键处理，也支持引用通知回复 |
+| 👋 **进退群通知** | 自定义欢迎与退群文案，支持成员艾特和头像 |
+| 🗝️ **分群管理** | 本群插件群管、全局或分群功能开关、群环境白名单 |
+| 🤖 **LLM 工具** | 禁言、解禁、状态查询、申请列表与审批，可选严格权限审查 |
 
-成员进群欢迎和退群通知分别提供开关与消息模板。模板支持以下占位符：
+<a id="usage"></a>
 
-| 占位符 | 进群事件 | 退群事件 |
-|---|---|---|
-| `{member_at}` | 生成 `<qqbot-at-user>`，通过 QQ Markdown 真正艾特新成员 | 仅显示成员 OpenID，无法艾特 |
-| `{member_avatar}` | 根据成员 OpenID 显示 100×100 头像 | 根据成员 OpenID 显示 100×100 头像 |
+## 🚀 安装与使用
 
-推荐配置：
+在 AstrBot 插件管理中通过[仓库链接](https://github.com/yun474/astrbot_plugin_qq_group_admin)安装，或导入插件 ZIP。也可将插件目录放入 `data/plugins/` 后重载，无需额外 Python 依赖。
 
-```text
-成员进群：欢迎 {member_at} 加入群聊！
-成员退群：{member_avatar}
-有成员退出了群聊。
-```
+使用前请确认：
 
-目前 `GROUP_MEMBER_REMOVE` 不提供昵称字段，成员退群后 QQ 客户端也无法再渲染对他的艾特，因此插件不提供昵称占位符。`{member_avatar}` 会使用机器人 AppID 和事件中的成员 OpenID 生成 QQ 头像地址，并通过 Markdown 图片显示；头像无法显示时该占位符为空。
+1. 使用 `qq_official` 或 `qq_official_webhook` 适配器，启用群/C2C 事件。
+2. 机器人是目标 QQ 群的管理员，并已获得对应群管理接口权限。
+3. 使用审批按钮需具备自定义 Markdown/按钮权限；Webhook 需订阅 `INTERACTION_CREATE`。
 
-WebSocket 模式会在连接创建前安装三个事件解析器，并确保启用 `GROUP_MEMBER`（`1 << 24`）和 `GROUP_AND_C2C_EVENT`（`1 << 25`）Intents。如果 QQ 连接已经建立后才热重载插件，插件还会同步连接 session，并在需要时自动重新鉴权；Webhook 模式仍需在 QQ 开放平台订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD` 和 `GROUP_MEMBER_REMOVE`。
+| 指令 | 用途 |
+| --- | --- |
+| `/禁言 @用户 [时间]` | 禁言一个或多个成员，省略时间默认 **1 分钟** |
+| `/解禁 @用户` | 解除成员禁言 |
+| `/禁言状态` | 查看全员禁言规则及被禁言成员 |
+| `/添加群管 @用户` / `/删除群管 @用户` | 管理本群插件群管 |
+| `/群管列表` / `/群管帮助` | 查看群管名单与使用帮助 |
+| `/群管功能` | 查看功能开关；点击状态填入修改指令，发送后生效 |
 
-## 指令权限
+时间支持 `30秒`、`10分`、`2小时`、`1天2小时`，纯数字按分钟；`0`、`解除`、`解禁`表示解除禁言。默认时长可在配置中修改。
 
-| 指令/操作 | AstrBot 管理员 | 当前群插件群管 | QQ 群主/管理员 | 普通成员 |
-|---|---:|---:|---:|---:|
-| 添加/删除插件群管 | 是 | 否 | 默认否，可分别配置 | 否 |
-| 查看群管列表、帮助 | 是 | 是 | 是 | 是 |
-| `/群管功能` 查看状态 | 是 | 是 | 是 | 否 |
-| 修改分群模式下的本群开关 | 是 | 是 | 是 | 否 |
-| 修改全局模式下的功能开关 | 是 | 否 | 否 | 否 |
-| 禁言/解禁、禁言状态 | 是 | 是 | 是 | 否 |
-| 按钮、编号指令或回复审批入群申请 | 是 | 是 | 是 | 否 |
-| `/群申请归零` | 是 | 是 | 是 | 否 |
+> 禁言仅适用于普通成员；全员禁言规则目前只提供查询，不提供设置。
 
-群主和群管理员能否使用 `/添加群管`、`/删除群管` 由“群主可增删插件群管”和“群管理员可增删插件群管”两项全局配置控制，初始均为关闭。插件群管不能增删其他插件群管。
+<a id="review"></a>
 
-LLM 群管工具不按发言者身份做代码级拦截：只要模型决定调用且当前群对应工具开关已开启，插件就以机器人自身权限执行。这与人工群管指令的权限判断彼此独立。
+## 📨 入群申请：两种人工审批方式
 
-分群群管保存的是 QQ 官方接口提供的 `member_openid`，不是公开 QQ 号。
+申请卡片展示昵称、时间、来源、风险提示和验证内容，隐藏成员 OpenID 与申请 ID。
 
-`default_mute_duration` 配置项控制省略时间时的默认禁言时长，初始值为 `1分`。发送 `/群管帮助` 可通过 Markdown 帮助卡片查看完整指令、当前默认时长和入群申请回复审批方式；Markdown 发送失败时 AstrBot 会自动降级为纯文本。
+### ① 点击回调按钮
 
-## 全局与分群开关
+**点击后直接审批并在群内反馈，不需要再发送指令。**
 
-“开启分群功能管理”默认关闭：
+| 按钮 | 谁能用 |
+| --- | --- |
+| 第一行「同意 / 拒绝」 | QQ 原生群主、群管理员 |
+| 第二行「授权群管同意 / 授权群管拒绝」 | AstrBot 管理员、当前群插件群管；未配置时不显示此行 |
 
-- 关闭时，所有群统一使用配置面板里的功能开关；AstrBot 管理员可用 `/群管功能 功能名 开启|关闭` 修改全局值，结果立即写回配置文件。
-- 开启时，各群可用 `/群管功能 功能名 开启|关闭` 保存独立覆盖值；没有覆盖值的功能继承全局配置。
-- 再次关闭时，插件立即回到全局配置，但保留已保存的分群覆盖值，之后重新开启还能继续使用。
-- `enabled_group_umos` 白名单始终优先，分群开关不能让白名单外的群启用插件。
+点击「拒绝」不填写理由。成功处理后旧按钮失效；处理中的重复点击不会重复提交。
 
-分群覆盖按完整 UMO（`平台ID:GroupMessage:群会话ID`）保存，多个 QQ 官方机器人平台即使碰巧拿到相同群 OpenID，也不会串配置。全局/分群模式本身只能从插件配置面板修改，没有群内切换指令。
+### ② 引用通知回复
 
-QQ 当前的禁言状态查询接口会返回全员禁言规则，但对应的设置接口只支持成员级禁言，暂不支持由机器人修改全员禁言模式或定时/周期规则。本插件因此只展示这些规则，不提供无法真正生效的规则配置项。
+回复**机器人发出的原申请通知**，发送 `同意`、`通过`、`拒绝` 或 `拒绝 理由`，例如 `拒绝 未完成入群验证`。
 
-## 入群申请可用信息
+> 引用审批需要 QQ 提供原通知消息 ID。若客户端未提供，请使用回调按钮或 QQ 原生群管理。按钮发送失败时通知会降级为纯文本。
 
-接口可能返回以下字段（没返回的字段会显示“未提供”或直接省略）：
+2.6.0 已移除申请编号、编号审批指令和 `/群申请归零`；旧通知上的编号按钮不再生效。LLM 申请审批工具仍单独保留。
 
-- `username`：昵称
-- `member_openid` / `union_openid`
-- `join_request_id`
-- `apply_at`：申请时间
-- `apply_source`：来源
-- `invited_by`：邀请人
-- `risk_tips`：风险提示
-- `verify_info.method`
-- `verify_info.verify_message`
-- `verify_info.review_qa_list[]`：问题与回答
+<details>
+<summary>按钮权限与事件订阅</summary>
 
-审批依靠按群编号和申请通知消息 ID 建立的本地映射，默认保留 30 天，数据位于 AstrBot 的 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。
+- QQ 原生群管按钮由 QQ 平台限制为管理员可点击；授权群管按钮限制指定用户，后台还会检查当前权限名单。
+- 新增授权群管不会更新已发送按钮的用户列表；已撤销权限的用户会被后台拒绝。
+- WebSocket 自动补充相关 Intents；Webhook 需订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`INTERACTION_CREATE`。
+- 按钮遵循 [QQ 官方回调协议](https://github.com/tencent-connect/bot-docs/blob/645787a45937e5d9c4f0f61afefdffde0f38696e/docs/develop/api-v2/server-inter/message/trans/msg-btn.md)，使用随机标识绑定申请，并校验平台、群和有效期。
 
-## 接口说明
+</details>
 
-插件使用 QQ 新 OpenAPI 域名 `api.bot.qq.com`（旧的 `api.sgroup.qq.com` 已于 2026-08-10 下线），调用：
+<a id="permissions"></a>
 
-- `POST /v2/groups/{group_openid}/restrict_chat_setting`
-- `GET /v2/groups/{group_openid}/join_request_list`
-- `POST /v2/groups/{group_openid}/approval_join_request/{member_openid}`
-- `GROUP_JOIN_REQUEST` 事件
-- `GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` 事件
+## 🗝️ 权限与开关
 
-禁言接口只能操作普通成员，无法禁言群主、群管理员或机器人；实际限制和权限以 QQ 开放平台为准。
+| 操作 | AstrBot 管理员 | 插件群管 | QQ 群主/管理员 | 普通成员 |
+| --- | :---: | :---: | :---: | :---: |
+| 禁言、解禁、状态查询、人工审批 | ✅ | ✅ | ✅ | — |
+| 添加/删除插件群管 | ✅ | — | 可配置，默认关闭 | — |
+| 查看/修改本群功能（分群模式） | ✅ | ✅ | ✅ | — |
+| 修改全局功能开关 | ✅ | — | — | — |
+| 查看群管名单与帮助 | ✅ | ✅ | ✅ | ✅ |
 
-## 开发
+插件群管按群保存，使用 QQ 官方成员 OpenID，不是公开 QQ 号。
+
+### LLM 唤醒人权限
+
+「⑥ LLM 群管工具 → **严格审查唤醒人权限**」默认**关闭**：
+
+- **关闭**：由模型决定调用，以机器人权限执行；不按唤醒人身份拦截。
+- **开启**：五个工具均校验真实唤醒人的群管权限，普通成员无法调用，查询工具也不例外。
+
+该开关为全局设置。工具结果交回模型自然回复；“关闭禁言和解禁的固定成功提示”只影响人工指令的成功提示，不影响错误提示和模型回复。
+
+### 全局与分群配置
+
+- **默认全局模式**：由 AstrBot 管理员统一设置；开启“分群功能管理”后，各群可覆盖功能开关，未覆盖项继承全局值。
+- **修改开关**：`/群管功能 功能名 开启` 或 `关闭`。全局/分群模式本身在配置面板切换。
+- **限制启用群**：在目标群发送 `/sid`，将 UMO 填入 `enabled_group_umos`；留空表示所有群启用，白名单始终优先。
+
+<a id="notices"></a>
+
+## 👋 进退群通知
+
+欢迎和退群通知分别提供开关与模板：
+
+| 占位符 | 进群 | 退群 |
+| --- | --- | --- |
+| `{member_at}` | 艾特新成员 | 显示 OpenID，无法艾特 |
+| `{member_avatar}` | 显示成员头像 | 显示成员头像 |
+
+欢迎文案可以写成 `欢迎 {member_at} 加入群聊！`；退群文案可以搭配 `{member_avatar}` 与 `有成员退出了群聊。`。头像不可用时会省略，Markdown 发送失败时降级为普通文本。
+
+<details>
+<summary>🧰 数据备份与开发验证</summary>
+
+群管、分群开关和待审映射保存在 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。待审映射默认有效期 30 天，审批前会清理过期项；备份时保存该文件即可。
+
+已在 AstrBot **4.26.8** 与 **4.28.1 源码环境**通过单元测试，尚未完成真实 QQ 群联调；测试版本不等于最低兼容版本。旧版适配器可能缺少原生群管角色字段。
+
+在插件父目录运行：
 
 ```bash
-python -m compileall .
-python -m unittest discover -s tests -v
+python -m unittest discover -s astrbot_plugin_qq_group_admin/tests -v
+ruff check astrbot_plugin_qq_group_admin
+ruff format --check astrbot_plugin_qq_group_admin
 ```
 
-仓库：[yun474/astrbot_plugin_qq_group_admin](https://github.com/yun474/astrbot_plugin_qq_group_admin)
+</details>
+
+---
+
+<div align="center">
+
+喜欢的话，给云云点一颗 ⭐ 吧！
+
+[更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_qq_group_admin/issues) · [MIT License](LICENSE)
+
+</div>

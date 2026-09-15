@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,24 +16,21 @@ from astrbot.api.star import Context, Star, StarTools, register
 from .api import QQGroupManageAPI
 from .storage import PluginStorage
 
-
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
 QQ_PLATFORMS = {"qq_official", "qq_official_webhook"}
 GROUP_MEMBER_INTENT = 1 << 24
 GROUP_AND_C2C_INTENT = 1 << 25
-LIFECYCLE_INTENTS = GROUP_MEMBER_INTENT | GROUP_AND_C2C_INTENT
+INTERACTION_INTENT = 1 << 26
+LIFECYCLE_INTENTS = GROUP_MEMBER_INTENT | GROUP_AND_C2C_INTENT | INTERACTION_INTENT
+REVIEW_CALLBACK_RE = re.compile(
+    r"^qqga:([0-9a-f]{32}):(approve|decline):(native|assigned)$"
+)
 LIFECYCLE_EVENTS = (
     "group_join_request",
     "group_member_add",
     "group_member_remove",
 )
 ACTION_RE = re.compile(r"^(同意|通过|拒绝|驳回)(?:\s+(.+))?$", re.S)
-INDEX_ACTION_RE = re.compile(
-    r"^/?(同意|通过|拒绝|驳回)\s+(\d+)(?:\s+(.+))?$",
-    re.S,
-)
-JOIN_REQUEST_ID_RE = re.compile(r"申请\s*ID[：:]\s*([^\s]+)", re.I)
-JOIN_REQUEST_INDEX_RE = re.compile(r"#(\d+)\s+新的入群申请")
 APPLY_SOURCE_NAMES = {
     "self_apply": "自主申请",
     "search": "搜索群聊申请",
@@ -101,6 +99,7 @@ CONFIG_SECTIONS = {
     "enable_mute_status_tool": "llm_tool_settings",
     "enable_join_list_tool": "llm_tool_settings",
     "enable_join_review_tool": "llm_tool_settings",
+    "strict_llm_permissions": "llm_tool_settings",
     "max_mute_seconds": "limit_settings",
 }
 LEGACY_CONFIG_KEYS = tuple(
@@ -111,6 +110,7 @@ LEGACY_CONFIG_KEYS = tuple(
         "enable_per_group_feature_settings",
         "allow_group_owner_manage_plugin_admins",
         "allow_group_admin_manage_plugin_admins",
+        "strict_llm_permissions",
     }
 )
 
@@ -157,13 +157,22 @@ def parse_duration(value: str) -> int:
     if text.isdigit():
         return int(text) * 60
     units = {
-        "天": 86400, "日": 86400, "d": 86400,
-        "小时": 3600, "时": 3600, "h": 3600,
-        "分钟": 60, "分": 60, "m": 60,
-        "秒": 1, "s": 1,
+        "天": 86400,
+        "日": 86400,
+        "d": 86400,
+        "小时": 3600,
+        "时": 3600,
+        "h": 3600,
+        "分钟": 60,
+        "分": 60,
+        "m": 60,
+        "秒": 1,
+        "s": 1,
     }
     matches = list(TIME_PART_RE.finditer(text))
-    if not matches or "".join(match.group(0) for match in matches).replace(" ", "") != text.replace(" ", ""):
+    if not matches or "".join(match.group(0) for match in matches).replace(
+        " ", ""
+    ) != text.replace(" ", ""):
         raise ValueError("时间格式错误，可用 30秒、10分、2小时、1天2小时；纯数字按分钟")
     return sum(int(match.group(1)) * units[match.group(2).lower()] for match in matches)
 
@@ -175,10 +184,9 @@ def intent_value(value: Any) -> int:
     return raw if isinstance(raw, int) else 0
 
 
-def format_request(item: dict[str, Any], index: int | None = None) -> str:
-    prefix = f"#{index} " if index is not None else ""
+def format_request(item: dict[str, Any], *, markdown: bool = False) -> str:
     lines = [
-        f"{prefix}新的入群申请",
+        "新的入群申请",
         f"昵称：{item.get('username') or '未提供'}",
         f"申请时间：{item.get('apply_at') or '未提供'}",
         "来源：" + format_apply_source(item.get("apply_source")),
@@ -195,7 +203,17 @@ def format_request(item: dict[str, Any], index: int | None = None) -> str:
             f"答：{qa.get('answer') or '（未回答）'}"
         )
     if item.get("auto_approved"):
-        lines.append(f"自动审批策略：{item['auto_approved'].get('strategy_id') or '已自动通过'}")
+        lines.append(
+            f"自动审批策略：{item['auto_approved'].get('strategy_id') or '已自动通过'}"
+        )
+    if markdown:
+        # All fields come from external users/API payloads, not trusted Markdown.
+        fields = [
+            re.sub(r"([\\`*_{}\[\]()#+.!|<>~-])", r"\\\1", line)
+            for field in lines[1:]
+            for line in field.splitlines()
+        ]
+        return "# 📨 入群申请\n\n" + "  \n".join(fields)
     return "\n".join(lines)
 
 
@@ -206,40 +224,50 @@ def format_apply_source(value: Any) -> str:
     return APPLY_SOURCE_NAMES.get(source.lower(), "其他来源")
 
 
-def review_keyboard(index: int) -> dict[str, Any]:
-    def button(button_id: str, label: str, command: str, style: int) -> dict[str, Any]:
+def review_keyboard(token: str, admin_ids: list[str] | None = None) -> dict[str, Any]:
+    """Native QQ admins and explicitly assigned admins use separate permission gates.
+
+    QQ's signed interaction carries the clicker ID, but no native member role.
+    The native buttons therefore rely on QQ's permission.type=1 enforcement.
+    """
+
+    def button(action: str, label: str, audience: str) -> dict[str, Any]:
+        permission: dict[str, Any] = {"type": 1}
+        if audience == "assigned":
+            permission = {"type": 0, "specify_user_ids": admin_ids}
         return {
-            "id": f"join-{button_id}-{index}",
+            "id": f"qqga-{action}-{audience}",
             "render_data": {
                 "label": label,
                 "visited_label": label,
-                "style": style,
+                "style": 1 if action == "approve" else 0,
             },
             "action": {
-                "type": 2,
-                "permission": {
-                    "type": 2,
-                    "specify_role_ids": [],
-                    "specify_user_ids": [],
-                },
-                "click_limit": 1,
-                "data": command,
-                "at_bot_show_channel_list": False,
+                "type": 1,
+                "permission": permission,
+                "data": f"qqga:{token}:{action}:{audience}",
+                "unsupport_tips": "请更新 QQ 客户端，或引用申请通知回复 同意 / 拒绝",
             },
         }
 
-    return {
-        "content": {
-            "rows": [
-                {
-                    "buttons": [
-                        button("approve", "同意", f"/同意 {index}", 1),
-                        button("decline", "拒绝", f"/拒绝 {index}", 0),
-                    ]
-                }
+    rows = [
+        {
+            "buttons": [
+                button("approve", "同意", "native"),
+                button("decline", "拒绝", "native"),
             ]
         }
-    }
+    ]
+    if admin_ids:
+        rows.append(
+            {
+                "buttons": [
+                    button("approve", "授权群管同意", "assigned"),
+                    button("decline", "授权群管拒绝", "assigned"),
+                ]
+            }
+        )
+    return {"content": {"rows": rows}}
 
 
 def format_mute_status(result: dict[str, Any]) -> str:
@@ -268,9 +296,13 @@ def format_mute_status(result: dict[str, Any]) -> str:
         lines.append("周期规则：")
         for rule in recurring_rules:
             enabled = "启用" if rule.get("enabled") else "停用"
-            weekdays = "、".join(
-                f"周{weekday_names.get(day, day)}" for day in rule.get("weekdays", [])
-            ) or "未指定星期"
+            weekdays = (
+                "、".join(
+                    f"周{weekday_names.get(day, day)}"
+                    for day in rule.get("weekdays", [])
+                )
+                or "未指定星期"
+            )
             lines.append(
                 f"- [{enabled}] {weekdays} {rule.get('start_time') or '未知'}-"
                 f"{rule.get('end_time') or '未知'}（{rule.get('task_id') or '无任务 ID'}）"
@@ -309,15 +341,9 @@ def format_group_admin_help(default_duration: str) -> str:
         "支持 `30秒`、`10分`、`2小时`、`1天2小时`  \n"
         "纯数字按分钟处理，例如 `30` 表示 **30分钟**\n\n"
         "## 入群审批\n\n"
-        "点击申请通知按钮，或直接发送编号指令：\n\n"
-        "- `/同意 1`\n"
-        "- `/拒绝 1 理由`\n\n"
-        "也可以回复对应的申请通知：\n\n"
-        "- `同意`\n"
-        "- `拒绝`\n"
-        "- `拒绝 理由`\n\n"
-        "> `/群申请归零`  \n"
-        "> 清除本群待审映射，并让下一条申请重新从 **#1** 编号\n\n"
+        "点击申请通知下方的同意 / 拒绝按钮，直接完成审批。\n\n"
+        "QQ 原生群管使用第一行；AstrBot 管理员和插件群管使用授权群管按钮。\n\n"
+        "拒绝并填写理由时，可引用申请通知回复 `拒绝 理由`。\n\n"
         "---\n\n"
         "💡 AstrBot 管理员拥有全局权限；插件群管和 QQ 群主/管理员拥有本群普通群管权限。"
     )
@@ -345,35 +371,11 @@ def review_action_text(event: AstrMessageEvent) -> str:
     ).strip()
 
 
-def quoted_join_request_id(reply: Reply) -> str:
-    quoted_text = str(reply.message_str or reply.text or "")
-    if not quoted_text:
-        quoted_text = "".join(
-            str(getattr(part, "text", "") or "")
-            for part in (reply.chain or [])
-            if isinstance(part, Plain)
-        )
-    match = JOIN_REQUEST_ID_RE.search(quoted_text)
-    return match.group(1).strip() if match else ""
-
-
-def quoted_join_request_index(reply: Reply) -> int | None:
-    quoted_text = str(reply.message_str or reply.text or "")
-    if not quoted_text:
-        quoted_text = "".join(
-            str(getattr(part, "text", "") or "")
-            for part in (reply.chain or [])
-            if isinstance(part, Plain)
-        )
-    match = JOIN_REQUEST_INDEX_RE.search(quoted_text)
-    return int(match.group(1)) if match else None
-
-
 @register(
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.4.1",
+    "2.6.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -389,6 +391,7 @@ class QQGroupAdminPlugin(Star):
         self._patch_task: asyncio.Task | None = None
         self._parser_state_class: Any = None
         self._owned_parser_methods: dict[str, Any] = {}
+        self._review_callbacks_inflight: set[str] = set()
         self._install_parser_patch()
 
     def _install_parser_patch(self) -> None:
@@ -461,6 +464,12 @@ class QQGroupAdminPlugin(Star):
             if client is None:
                 continue
             platform_id = meta.id
+            if (
+                platform_id in self._patched
+                and self._patched[platform_id]["client"] is not client
+            ):
+                # Platform reload keeps its ID but replaces the SDK client.
+                self._restore_client_handlers(self._patched.pop(platform_id))
             if platform_id not in self._patched:
                 old_handlers = {
                     name: getattr(client, name, None)
@@ -468,6 +477,7 @@ class QQGroupAdminPlugin(Star):
                         "on_group_join_request",
                         "on_group_member_add",
                         "on_group_member_remove",
+                        "on_interaction_create",
                     )
                 }
 
@@ -507,9 +517,24 @@ class QQGroupAdminPlugin(Star):
                 setattr(client, "on_group_join_request", handler)
                 setattr(client, "on_group_member_add", member_add_handler)
                 setattr(client, "on_group_member_remove", member_remove_handler)
+
+                async def interaction_handler(
+                    interaction: Any,
+                    pid: str = platform_id,
+                    original: Any = old_handlers["on_interaction_create"],
+                ) -> None:
+                    if await self._handle_review_interaction(pid, interaction):
+                        return
+                    if original is not None:
+                        await original(interaction)
+
+                setattr(client, "on_interaction_create", interaction_handler)
                 self._patched[platform_id] = {
                     "client": client,
                     "old_handlers": old_handlers,
+                    "owned_handlers": {
+                        name: getattr(client, name) for name in old_handlers
+                    },
                     "connections": set(),
                 }
             patch_state = self._patched[platform_id]
@@ -522,7 +547,9 @@ class QQGroupAdminPlugin(Star):
                 if connection is None or id(connection) in patch_state["connections"]:
                     continue
 
-                def join_request_parser(payload: dict[str, Any], c: Any = client) -> None:
+                def join_request_parser(
+                    payload: dict[str, Any], c: Any = client
+                ) -> None:
                     data = dict(payload.get("d", {}) or {})
                     data["_event_id"] = str(payload.get("id") or "")
                     c.ws_dispatch("group_join_request", data)
@@ -532,7 +559,9 @@ class QQGroupAdminPlugin(Star):
                     data["_event_id"] = str(payload.get("id") or "")
                     c.ws_dispatch("group_member_add", data)
 
-                def member_remove_parser(payload: dict[str, Any], c: Any = client) -> None:
+                def member_remove_parser(
+                    payload: dict[str, Any], c: Any = client
+                ) -> None:
                     data = dict(payload.get("d", {}) or {})
                     data["_event_id"] = str(payload.get("id") or "")
                     c.ws_dispatch("group_member_remove", data)
@@ -541,9 +570,7 @@ class QQGroupAdminPlugin(Star):
                 connection.parser["group_member_add"] = member_add_parser
                 connection.parser["group_member_remove"] = member_remove_parser
                 patch_state["connections"].add(id(connection))
-                logger.info(
-                    "[%s] 已接入 QQ 入群申请与成员进退群事件", PLUGIN_NAME
-                )
+                logger.info("[%s] 已接入 QQ 入群申请与成员进退群事件", PLUGIN_NAME)
 
     async def _ensure_group_member_intent(self, platform: Any, client: Any) -> None:
         current = intent_value(getattr(client, "intents", 0))
@@ -556,7 +583,7 @@ class QQGroupAdminPlugin(Star):
                     intent_value(platform_intents) | LIFECYCLE_INTENTS
                 )
             logger.info(
-                "[%s] 已启用群生命周期 Intents（1 << 24 | 1 << 25），当前值：%s",
+                "[%s] 已启用群生命周期和按钮回调 Intents，当前值：%s",
                 PLUGIN_NAME,
                 required,
             )
@@ -688,16 +715,17 @@ class QQGroupAdminPlugin(Star):
         stored = dict(item)
         stored["platform_id"] = platform_id
         stored["group_openid"] = group_openid
-        pending_key, review_index = self.storage.reserve_pending(stored)
-        content = format_request(item, review_index)
+        stored["callback_token"] = secrets.token_hex(16)
+        pending_key = self.storage.reserve_pending(stored)
+        content = format_request(item, markdown=True)
         review_enabled = self._feature_setting(
             "enable_join_reply_review",
             group_umo,
         )
         if review_enabled:
             content += (
-                f"\n\n群管可点击按钮，或发送：/同意 {review_index} / "
-                f"/拒绝 {review_index} [理由]\n也可回复本消息：同意 / 拒绝 [理由]"
+                "\n\n点击下方按钮直接审批；拒绝并填写理由时，可引用本消息回复：拒绝 理由。"
+                "\nQQ 原生群管使用第一行；AstrBot 管理员和插件群管使用授权群管按钮。"
             )
         try:
             api = QQGroupManageAPI(platform.client)
@@ -705,7 +733,12 @@ class QQGroupAdminPlugin(Star):
                 result = await api.send_group_markdown(
                     group_openid,
                     content,
-                    keyboard=review_keyboard(review_index) if review_enabled else None,
+                    keyboard=review_keyboard(
+                        stored["callback_token"],
+                        self._callback_admin_ids(platform_id, group_openid),
+                    )
+                    if review_enabled
+                    else None,
                 )
             except Exception:
                 logger.warning(
@@ -713,7 +746,12 @@ class QQGroupAdminPlugin(Star):
                     PLUGIN_NAME,
                     exc_info=True,
                 )
-                result = await api.send_group_text(group_openid, content)
+                fallback = format_request(item)
+                if review_enabled:
+                    fallback += (
+                        "\n\n按钮暂不可用，可引用本消息回复：同意 / 拒绝 [理由]。"
+                    )
+                result = await api.send_group_text(group_openid, fallback)
             message_id = self._response_id(result)
             if message_id:
                 pending_key = self.storage.bind_pending_message(
@@ -724,6 +762,123 @@ class QQGroupAdminPlugin(Star):
             self.storage.remove_pending(pending_key)
             logger.exception("[%s] 转发入群申请失败", PLUGIN_NAME)
 
+    def _callback_admin_ids(self, platform_id: str, group_openid: str) -> list[str]:
+        config = self.context.get_config(self._group_umo(platform_id, group_openid))
+        return sorted(
+            {
+                str(user_id)
+                for user_id in (
+                    *config.get("admins_id", []),
+                    *self.storage.group_admins(group_openid),
+                )
+                if str(user_id)
+            }
+        )
+
+    async def _handle_review_interaction(
+        self, platform_id: str, interaction: Any
+    ) -> bool:
+        """Consume only our SDK button callbacks, leaving other interactions untouched.
+
+        Native-role authorization is enforced by QQ on the original type=1
+        permission button; the authenticated callback has no native role field.
+        Assigned admins are also checked against current server-side settings.
+        """
+        resolved = getattr(getattr(interaction, "data", None), "resolved", None)
+        data = str(getattr(resolved, "button_data", "") or "")
+        if not data.startswith("qqga:"):
+            return False
+        platform = self.context.get_platform_inst(platform_id)
+        if platform is None:
+            return True
+        api = QQGroupManageAPI(platform.client)
+        interaction_id = str(getattr(interaction, "id", "") or "")
+        if not interaction_id:
+            return True
+
+        async def acknowledge(code: int) -> None:
+            try:
+                # ACK is independent of the potentially slower approval request.
+                await asyncio.wait_for(
+                    api.acknowledge_interaction(interaction_id, code), 3
+                )
+            except Exception:
+                logger.exception("[%s] 回应审批按钮失败", PLUGIN_NAME)
+
+        match = REVIEW_CALLBACK_RE.fullmatch(data)
+        group = str(getattr(interaction, "group_openid", "") or "")
+        sender = str(getattr(interaction, "group_member_openid", "") or "")
+        if (
+            not match
+            or not group
+            or not sender
+            or getattr(interaction, "type", None) != 11
+            or getattr(interaction, "chat_type", None) != 1
+        ):
+            await acknowledge(4)
+            return True
+        token, action, audience = match.groups()
+        if getattr(resolved, "button_id", None) != f"qqga-{action}-{audience}":
+            await acknowledge(4)
+            return True
+        umo = self._group_umo(platform_id, group)
+        if not self._umo_enabled(umo) or not self._feature_setting(
+            "enable_join_reply_review", umo
+        ):
+            await acknowledge(4)
+            return True
+        matched = self.storage.find_pending_by_token(token)
+        if matched is None:
+            await acknowledge(3)  # Completed, expired or from a removed notification.
+            return True
+        pending_key, pending = matched
+        if (
+            pending.get("platform_id") != platform_id
+            or pending.get("group_openid") != group
+        ):
+            await acknowledge(4)
+            return True
+        if audience == "assigned" and sender not in self._callback_admin_ids(
+            platform_id, group
+        ):
+            await acknowledge(4)
+            return True
+        if token in self._review_callbacks_inflight:
+            await acknowledge(2)
+            return True
+        self._review_callbacks_inflight.add(token)
+        try:
+            await acknowledge(0)
+            try:
+                await api.review_join_request(
+                    group,
+                    str(pending["member_openid"]),
+                    str(pending["join_request_id"]),
+                    approve=action == "approve",
+                )
+            except Exception:
+                logger.exception("[%s] 按钮审批入群申请失败", PLUGIN_NAME)
+                result = "入群申请审批失败，请查看机器人日志并核实申请状态。"
+            else:
+                self.storage.remove_pending(pending_key)
+                result = (
+                    "已同意入群申请。" if action == "approve" else "已拒绝入群申请。"
+                )
+            try:
+                await api.send_group_text(
+                    group,
+                    result,
+                    event_id=str(
+                        getattr(interaction, "event_id", "") or interaction_id
+                    ),
+                )
+            except Exception:
+                # The approval may already have succeeded; never repeat it for a send failure.
+                logger.exception("[%s] 发送按钮审批结果失败", PLUGIN_NAME)
+        finally:
+            self._review_callbacks_inflight.discard(token)
+        return True
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def reply_review(self, event: AstrMessageEvent) -> None:
         if not self._is_qq_group(event) or not self._event_feature_setting(
@@ -731,68 +886,32 @@ class QQGroupAdminPlugin(Star):
             "enable_join_reply_review",
         ):
             return
-        action_text = review_action_text(event)
-        indexed_match = INDEX_ACTION_RE.match(action_text)
-        action_match = ACTION_RE.match(action_text)
-        if not indexed_match and not action_match:
+        action_match = ACTION_RE.fullmatch(review_action_text(event))
+        if not action_match:
             return
-
-        pending_key = ""
-        pending = None
-        quoted_request_id = ""
-        quoted_index = None
-        if indexed_match:
-            review_index = int(indexed_match.group(2))
-            matched = self.storage.find_pending_by_index(
-                event.get_group_id(),
-                review_index,
-            )
-            if matched:
-                pending_key, pending = matched
-            event.stop_event()
-        else:
-            reply = next(
-                (part for part in event.get_messages() if isinstance(part, Reply)),
-                None,
-            )
-            if reply is None:
-                return
-            pending_key = str(reply.id or "")
-            pending = self.storage.get_pending(pending_key) if pending_key else None
-            quoted_index = quoted_join_request_index(reply)
-            if not pending and quoted_index is not None:
-                matched = self.storage.find_pending_by_index(
-                    event.get_group_id(),
-                    quoted_index,
-                )
-                if matched:
-                    pending_key, pending = matched
-            quoted_request_id = quoted_join_request_id(reply)
-            if not pending and quoted_request_id:
-                matched = self.storage.find_pending_by_join_request_id(
-                    quoted_request_id,
-                    event.get_group_id(),
-                )
-                if matched:
-                    pending_key, pending = matched
-
+        reply = next(
+            (part for part in event.get_messages() if isinstance(part, Reply)), None
+        )
+        if reply is None:
+            return
+        # Never infer an application from quoted text: only our saved message ID is trusted.
+        self.storage.prune()
+        pending_key = str(reply.id or "")
+        pending = self.storage.get_pending(pending_key) if pending_key else None
         if not pending:
-            if indexed_match or quoted_request_id or quoted_index is not None:
-                event.stop_event()
-                yield event.plain_result(
-                    "找不到这条入群申请，可能编号错误、通知已过期或插件数据已被清理。"
-                )
             return
         event.stop_event()
-        if pending.get("group_openid") != event.get_group_id():
-            yield event.plain_result("这条申请不属于当前群，不能跨群审批。")
+        if (
+            pending.get("group_openid") != event.get_group_id()
+            or pending.get("platform_id") != event.get_platform_id()
+        ):
+            yield event.plain_result("这条申请不属于当前群或平台，不能审批。")
             return
         if not self._can_manage(event):
             yield event.plain_result("你没有本群群管权限。")
             return
-        approve = (indexed_match or action_match).group(1) in {"同意", "通过"}
-        reason_group = 3 if indexed_match else 2
-        reason = ((indexed_match or action_match).group(reason_group) or "").strip()
+        approve = action_match.group(1) in {"同意", "通过"}
+        reason = (action_match.group(2) or "").strip()
         try:
             await self._review(
                 event,
@@ -806,7 +925,11 @@ class QQGroupAdminPlugin(Star):
             yield event.plain_result(f"审批失败：{exc}")
             return
         self.storage.remove_pending(pending_key)
-        result = "已同意入群申请。" if approve else f"已拒绝入群申请。{(' 理由：' + reason) if reason else ''}"
+        result = (
+            "已同意入群申请。"
+            if approve
+            else f"已拒绝入群申请。{(' 理由：' + reason) if reason else ''}"
+        )
         yield event.plain_result(result)
 
     @filter.command("禁言")
@@ -894,7 +1017,9 @@ class QQGroupAdminPlugin(Star):
         if not targets:
             yield event.plain_result("请艾特要添加的群管。")
             return
-        added = sum(self.storage.add_group_admin(event.get_group_id(), item) for item in targets)
+        added = sum(
+            self.storage.add_group_admin(event.get_group_id(), item) for item in targets
+        )
         yield event.plain_result(f"已添加 {added} 名本群群管。")
 
     @filter.command("删除群管", alias={"移除群管"})
@@ -913,7 +1038,10 @@ class QQGroupAdminPlugin(Star):
         if not targets:
             yield event.plain_result("请艾特要删除的群管。")
             return
-        removed = sum(self.storage.remove_group_admin(event.get_group_id(), item) for item in targets)
+        removed = sum(
+            self.storage.remove_group_admin(event.get_group_id(), item)
+            for item in targets
+        )
         yield event.plain_result(f"已删除 {removed} 名本群群管。")
 
     @filter.command("群管列表")
@@ -924,10 +1052,11 @@ class QQGroupAdminPlugin(Star):
         if not self._event_feature_setting(event, "enable_group_admin_commands"):
             return
         admins = self.storage.group_admins(event.get_group_id())
-        content = "本群群管：\n" + ("\n".join(f"- {item}" for item in admins) if admins else "（暂无）")
+        content = "本群群管：\n" + (
+            "\n".join(f"- {item}" for item in admins) if admins else "（暂无）"
+        )
         content += (
-            "\nAstrBot 管理员拥有全局权限；QQ 群主和群管理员"
-            "默认拥有本群普通群管权限。"
+            "\nAstrBot 管理员拥有全局权限；QQ 群主和群管理员默认拥有本群普通群管权限。"
         )
         yield event.plain_result(content)
 
@@ -938,12 +1067,10 @@ class QQGroupAdminPlugin(Star):
             return
         if not self._event_feature_setting(event, "enable_group_admin_commands"):
             return
-        default_duration = str(
-            self._config("default_mute_duration", "1分") or "1分"
-        )
-        yield event.plain_result(format_group_admin_help(default_duration)).use_markdown(
-            True
-        )
+        default_duration = str(self._config("default_mute_duration", "1分") or "1分")
+        yield event.plain_result(
+            format_group_admin_help(default_duration)
+        ).use_markdown(True)
 
     @filter.command("群管功能")
     async def group_feature_settings(
@@ -956,14 +1083,10 @@ class QQGroupAdminPlugin(Star):
         if not self._is_qq_group(event):
             yield event.plain_result("该指令仅支持已启用的 QQ 官方机器人群聊。")
             return
-        per_group = bool(
-            self._config("enable_per_group_feature_settings", False)
-        )
+        per_group = bool(self._config("enable_per_group_feature_settings", False))
         changing = bool(feature_name or action)
         if not per_group and changing and not self._is_astr_admin(event):
-            yield event.plain_result(
-                "你没有权限更改配置项，别乱动人家的功能啊！"
-            )
+            yield event.plain_result("你没有权限更改配置项，别乱动人家的功能啊！")
             return
         if not self._can_manage(event):
             yield event.plain_result("你没有本群群管权限。")
@@ -1016,19 +1139,6 @@ class QQGroupAdminPlugin(Star):
             format_feature_status(values, per_group=per_group)
         ).use_markdown(True)
 
-    @filter.command("群申请归零")
-    async def reset_join_requests(self, event: AstrMessageEvent) -> None:
-        if not self._is_qq_group(event):
-            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
-            return
-        if not self._can_manage(event):
-            yield event.plain_result("你没有本群群管权限。")
-            return
-        removed = self.storage.reset_group_pending(event.get_group_id())
-        yield event.plain_result(
-            f"已清除本群 {removed} 条待审申请映射；下一条申请将从 #1 开始。"
-        )
-
     @filter.command("禁言状态")
     async def mute_status_command(self, event: AstrMessageEvent) -> None:
         """查看全员禁言规则和当前处于禁言中的成员。"""
@@ -1060,7 +1170,7 @@ class QQGroupAdminPlugin(Star):
         member_openid: str,
         duration: str = "",
     ) -> str:
-        """禁言或解禁当前 QQ 群的一名普通成员，仅群管可用。
+        """禁言或解禁当前 QQ 群的一名普通成员，开启严格权限审查时仅群管可用。
 
         Args:
             member_openid(string): 被操作成员的群成员 OpenID
@@ -1071,6 +1181,10 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法使用群禁言工具。"
         if not self._event_feature_setting(event, "enable_mute_tool"):
             return "QQ 群禁言工具已关闭。"
+        if self._config("strict_llm_permissions", False) and not self._can_manage(
+            event
+        ):
+            return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             duration = duration.strip() or str(
                 self._config("default_mute_duration", "1分") or "1分"
@@ -1089,7 +1203,7 @@ class QQGroupAdminPlugin(Star):
         event: Any,
         member_openid: str,
     ) -> str:
-        """解除当前 QQ 群一名普通成员的禁言，仅群管可用。
+        """解除当前 QQ 群一名普通成员的禁言，开启严格权限审查时仅群管可用。
 
         Args:
             member_openid(string): 被解除禁言成员的群成员 OpenID
@@ -1099,6 +1213,10 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法使用群解禁工具。"
         if not self._event_feature_setting(event, "enable_unmute_tool"):
             return "QQ 群解禁工具已关闭。"
+        if self._config("strict_llm_permissions", False) and not self._can_manage(
+            event
+        ):
+            return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             await self._mute(event, event.get_group_id(), member_openid, 0)
         except Exception as exc:
@@ -1107,12 +1225,16 @@ class QQGroupAdminPlugin(Star):
 
     @filter.llm_tool(name="qq_group_get_mute_status")
     async def mute_status_tool(self, event: Any) -> str:
-        """查询当前 QQ 群的全员禁言规则和被禁言成员列表，仅群管可用。"""
+        """查询当前 QQ 群的全员禁言规则和被禁言成员列表，开启严格权限审查时仅群管可用。"""
         event = resolve_tool_event(event)
         if not self._is_qq_group(event):
             return "当前场景不是 QQ 官方机器人群聊，无法查询群禁言状态。"
         if not self._event_feature_setting(event, "enable_mute_status_tool"):
             return "QQ 群禁言状态工具已关闭。"
+        if self._config("strict_llm_permissions", False) and not self._can_manage(
+            event
+        ):
+            return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             result = await QQGroupManageAPI(
                 self._platform(event).client
@@ -1130,7 +1252,7 @@ class QQGroupAdminPlugin(Star):
         cursor: str = "",
         limit: int = 20,
     ) -> str:
-        """拉取当前 QQ 群待处理的入群申请列表，仅群管可用。
+        """拉取当前 QQ 群待处理的入群申请列表，开启严格权限审查时仅群管可用。
 
         Args:
             cursor(string): 分页游标，第一页传空字符串
@@ -1141,6 +1263,10 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法拉取入群申请。"
         if not self._event_feature_setting(event, "enable_join_list_tool"):
             return "入群申请列表工具已关闭。"
+        if self._config("strict_llm_permissions", False) and not self._can_manage(
+            event
+        ):
+            return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         platform = self._platform(event)
         try:
             result = await QQGroupManageAPI(platform.client).list_join_requests(
@@ -1153,7 +1279,7 @@ class QQGroupAdminPlugin(Star):
         items = result.get("list", []) if isinstance(result, dict) else []
         if not items:
             return "当前没有待处理的入群申请。"
-        text = "\n\n".join(format_request(item, index) for index, item in enumerate(items, 1))
+        text = "\n\n".join(format_request(item) for item in items)
         next_cursor = result.get("next_cursor", "") if isinstance(result, dict) else ""
         if next_cursor:
             text += f"\n\n下一页 cursor：{next_cursor}"
@@ -1168,7 +1294,7 @@ class QQGroupAdminPlugin(Star):
         action: str,
         reject_reason: str = "",
     ) -> str:
-        """同意或拒绝当前 QQ 群的某个入群申请，仅群管可用。
+        """同意或拒绝当前 QQ 群的某个入群申请，开启严格权限审查时仅群管可用。
 
         Args:
             member_openid(string): 申请人的群成员 OpenID
@@ -1181,6 +1307,10 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法审批入群申请。"
         if not self._event_feature_setting(event, "enable_join_review_tool"):
             return "入群申请审批工具已关闭。"
+        if self._config("strict_llm_permissions", False) and not self._can_manage(
+            event
+        ):
+            return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         action = action.strip().lower()
         if action not in {"approve", "decline"}:
             return "action 只能是 approve 或 decline。"
@@ -1209,7 +1339,9 @@ class QQGroupAdminPlugin(Star):
         api = QQGroupManageAPI(self._platform(event).client)
         if seconds == 0:
             return await api.mute_member(group_openid, member_openid, op="del")
-        expire_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+        expire_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(
+            timespec="seconds"
+        )
         return await api.mute_member(
             group_openid,
             member_openid,
@@ -1335,13 +1467,9 @@ class QQGroupAdminPlugin(Star):
             return True
         role = self._qq_member_role(event)
         if role == "owner":
-            return bool(
-                self._config("allow_group_owner_manage_plugin_admins", False)
-            )
+            return bool(self._config("allow_group_owner_manage_plugin_admins", False))
         if role == "admin":
-            return bool(
-                self._config("allow_group_admin_manage_plugin_admins", False)
-            )
+            return bool(self._config("allow_group_admin_manage_plugin_admins", False))
         return False
 
     @staticmethod
@@ -1358,20 +1486,14 @@ class QQGroupAdminPlugin(Star):
         return (
             event.get_platform_name() in QQ_PLATFORMS
             and bool(event.get_group_id())
-            and self._umo_enabled(
-                str(getattr(event, "unified_msg_origin", "") or "")
-            )
+            and self._umo_enabled(str(getattr(event, "unified_msg_origin", "") or ""))
         )
 
     def _umo_enabled(self, umo: str) -> bool:
         configured = self._config("enabled_group_umos", []) or []
         if isinstance(configured, str):
             configured = [configured]
-        whitelist = {
-            str(item).strip()
-            for item in configured
-            if str(item).strip()
-        }
+        whitelist = {str(item).strip() for item in configured if str(item).strip()}
         return not whitelist or umo in whitelist
 
     @staticmethod
@@ -1395,12 +1517,18 @@ class QQGroupAdminPlugin(Star):
         for mention in mentions:
             if getattr(mention, "is_you", False):
                 continue
-            member_openid = getattr(mention, "member_openid", None) or getattr(mention, "id", None)
+            member_openid = getattr(mention, "member_openid", None) or getattr(
+                mention, "id", None
+            )
             if member_openid and str(member_openid) not in targets:
                 targets.append(str(member_openid))
         # Fallback for adapters that preserve At components directly.
         for part in event.get_messages():
-            if isinstance(part, At) and str(part.qq) not in {"qq_official", event.get_self_id(), "all"}:
+            if isinstance(part, At) and str(part.qq) not in {
+                "qq_official",
+                event.get_self_id(),
+                "all",
+            }:
                 if str(part.qq) not in targets:
                     targets.append(str(part.qq))
         return targets[:10]
@@ -1416,19 +1544,26 @@ class QQGroupAdminPlugin(Star):
             return str(result.get("id") or "")
         return str(getattr(result, "id", "") or "")
 
+    @staticmethod
+    def _restore_client_handlers(state: dict[str, Any]) -> None:
+        client = state["client"]
+        for attr, old_handler in state["old_handlers"].items():
+            if getattr(client, attr, None) is not state["owned_handlers"][attr]:
+                continue
+            if old_handler is None:
+                delattr(client, attr)
+            else:
+                setattr(client, attr, old_handler)
+
     async def terminate(self) -> None:
         if self._patch_task:
             self._patch_task.cancel()
+            try:
+                await self._patch_task
+            except asyncio.CancelledError:
+                pass
         for state in self._patched.values():
-            client = state["client"]
-            for attr, old_handler in state["old_handlers"].items():
-                if old_handler is None:
-                    try:
-                        delattr(client, attr)
-                    except AttributeError:
-                        pass
-                else:
-                    setattr(client, attr, old_handler)
+            self._restore_client_handlers(state)
         self._patched.clear()
         state_class = self._parser_state_class
         if state_class is not None:

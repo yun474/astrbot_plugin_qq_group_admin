@@ -80,7 +80,7 @@
   "join_request_settings": {
     "description": "④ 入群申请",
     "type": "object",
-    "hint": "控制申请通知、群内审批入口和本地待审映射。",
+    "hint": "控制申请通知、回调按钮审批和本地待审映射。",
     "items": {
       "enable_join_notice": {
         "description": "自动发送入群申请通知",
@@ -91,7 +91,7 @@
         "description": "启用群内申请审批",
         "type": "bool",
         "default": true,
-        "hint": "允许群管通过通知按钮、编号指令或回复通知审批申请。"
+        "hint": "允许群管点击回调按钮直接审批；引用通知回复同意或拒绝也可审批（需要 QQ 提供原通知消息 ID）。"
       },
       "join_request_page_size": {
         "description": "申请列表工具默认拉取条数（1-100）",
@@ -139,8 +139,14 @@
   "llm_tool_settings": {
     "description": "⑥ LLM 群管工具",
     "type": "object",
-    "hint": "只控制模型能否调用对应工具。工具以机器人自身权限执行，结果交回模型继续自然回复。",
+    "hint": "工具以机器人权限执行，结果交回模型回复；可开启严格审查，对唤醒人执行代码级群管鉴权。",
     "items": {
+      "strict_llm_permissions": {
+        "description": "严格审查唤醒人权限",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭，保持由模型决定是否调用。开启后，所有 LLM 群管工具仅允许 AstrBot 管理员、当前群插件群管或 QQ 原生群主/管理员唤醒调用；依据真实工具上下文校验，不接受模型自报身份。此项为全局设置。"
+      },
       "enable_mute_tool": {
         "description": "启用 LLM 群禁言工具",
         "type": "bool",

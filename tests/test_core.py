@@ -22,7 +22,6 @@ from astrbot_plugin_qq_group_admin.main import (
     GROUP_AND_C2C_INTENT,
     GROUP_MEMBER_INTENT,
     LIFECYCLE_EVENTS,
-    quoted_join_request_index,
     render_member_notice,
     review_keyboard,
     review_action_text,
@@ -125,79 +124,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(matched[0], "notification-1")
         self.assertEqual(matched[1]["join_request_id"], "request-1")
 
-    def test_pending_request_gets_stable_per_group_index(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            storage = PluginStorage(Path(temp_dir) / "state.json")
-            key, index = storage.reserve_pending(
-                {
-                    "group_openid": "group-1",
-                    "join_request_id": "request-1",
-                }
-            )
-            storage.bind_pending_message(key, "notification-1")
-            matched = storage.find_pending_by_index("group-1", 1)
-
-        self.assertEqual(index, 1)
-        self.assertEqual(matched[0], "notification-1")
-        self.assertEqual(matched[1]["join_request_id"], "request-1")
-
-    def test_group_pending_reset_clears_only_target_group_and_restarts_index(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            storage = PluginStorage(Path(temp_dir) / "state.json")
-            storage.reserve_pending(
-                {"group_openid": "group-1", "join_request_id": "request-1"}
-            )
-            storage.reserve_pending(
-                {"group_openid": "group-2", "join_request_id": "request-2"}
-            )
-
-            removed = storage.reset_group_pending("group-1")
-            _, restarted_index = storage.reserve_pending(
-                {"group_openid": "group-1", "join_request_id": "request-3"}
-            )
-
-        self.assertEqual(removed, 1)
-        self.assertEqual(restarted_index, 1)
-        self.assertIsNotNone(storage.find_pending_by_index("group-2", 1))
-
-    def test_plugin_group_admin_can_reset_pending_requests(self) -> None:
-        class Event:
-            @staticmethod
-            def get_group_id() -> str:
-                return "group-1"
-
-            @staticmethod
-            def plain_result(text: str) -> str:
-                return text
-
-            @staticmethod
-            def is_admin() -> bool:
-                return False
-
-            @staticmethod
-            def get_sender_id() -> str:
-                return "plugin-group-admin"
-
-            @staticmethod
-            def get_self_id() -> str:
-                return "bot"
-
-        plugin = object.__new__(QQGroupAdminPlugin)
-        plugin._is_qq_group = lambda event: True
-        plugin.storage = SimpleNamespace(
-            group_admins=lambda group_id: ["plugin-group-admin"],
-            reset_group_pending=lambda group_id: 99,
-        )
-
-        results = asyncio.run(
-            _collect_async_generator(plugin.reset_join_requests(Event()))
-        )
-
-        self.assertEqual(
-            results,
-            ["已清除本群 99 条待审申请映射；下一条申请将从 #1 开始。"],
-        )
-
     def test_reply_review_uses_only_new_plain_text(self) -> None:
         reply = Reply(
             id="",
@@ -215,125 +141,6 @@ class CoreTests(unittest.TestCase):
                 return "#1 新的入群申请 @bot 同意"
 
         self.assertEqual(review_action_text(Event()), "同意")
-        self.assertEqual(quoted_join_request_index(reply), 1)
-
-    def test_reply_review_handles_empty_reply_id_and_stops_other_plugins(self) -> None:
-        reply = Reply(
-            id="",
-            message_str="#1 新的入群申请",
-            chain=[Plain(text="#1 新的入群申请")],
-        )
-
-        class Event:
-            stopped = False
-
-            @staticmethod
-            def get_messages():
-                return [reply, At(qq="bot-openid"), Plain(text="同意")]
-
-            @staticmethod
-            def get_group_id() -> str:
-                return "group-1"
-
-            @classmethod
-            def stop_event(cls) -> None:
-                cls.stopped = True
-
-            @staticmethod
-            def plain_result(text: str) -> str:
-                return text
-
-        pending = {
-            "group_openid": "group-1",
-            "member_openid": "member-1",
-            "join_request_id": "request-1",
-        }
-        removed = []
-        plugin = object.__new__(QQGroupAdminPlugin)
-        plugin.config = {
-            "enable_join_reply_review": True,
-        }
-        plugin.storage = SimpleNamespace(
-            get_pending=lambda message_id: None,
-            find_pending_by_index=lambda group_id, index: (
-                "notification-1",
-                pending,
-            ),
-            find_pending_by_join_request_id=lambda request_id, group_id: None,
-            remove_pending=lambda message_id: removed.append(message_id),
-        )
-        plugin._is_qq_group = lambda event: True
-        plugin._can_manage = lambda event: True
-        plugin._review = AsyncMock(return_value={})
-
-        event = Event()
-
-        async def run_handler():
-            return [item async for item in plugin.reply_review(event)]
-
-        results = asyncio.run(run_handler())
-
-        self.assertTrue(Event.stopped)
-        plugin._review.assert_awaited_once_with(
-            event,
-            "group-1",
-            "member-1",
-            "request-1",
-            True,
-            "",
-        )
-        self.assertEqual(removed, ["notification-1"])
-        self.assertEqual(results, ["已同意入群申请。"])
-
-    def test_index_review_checks_permission_and_stops_other_plugins(self) -> None:
-        class Event:
-            stopped = False
-
-            @staticmethod
-            def get_messages():
-                return [Plain(text="/拒绝 7 测试理由")]
-
-            @staticmethod
-            def get_group_id() -> str:
-                return "group-1"
-
-            @classmethod
-            def stop_event(cls) -> None:
-                cls.stopped = True
-
-            @staticmethod
-            def plain_result(text: str) -> str:
-                return text
-
-        plugin = object.__new__(QQGroupAdminPlugin)
-        plugin.config = {
-            "enable_join_reply_review": True,
-        }
-        plugin.storage = SimpleNamespace(
-            find_pending_by_index=lambda group_id, index: (
-                "notification-7",
-                {
-                    "group_openid": "group-1",
-                    "member_openid": "member-1",
-                    "join_request_id": "request-7",
-                },
-            )
-        )
-        plugin._is_qq_group = lambda event: True
-        plugin._can_manage = lambda event: False
-        plugin._review = AsyncMock(return_value={})
-
-        event = Event()
-        results = asyncio.run(
-            _collect_async_generator(plugin.reply_review(event))
-        )
-
-        self.assertTrue(event.stopped)
-        plugin._review.assert_not_awaited()
-        self.assertEqual(
-            results,
-            ["你没有本群群管权限。"],
-        )
 
     def test_request_notice_hides_ids_and_translates_source(self) -> None:
         text = format_request(
@@ -347,9 +154,9 @@ class CoreTests(unittest.TestCase):
                     "verify_message": "答案",
                 },
             },
-            3,
         )
-        self.assertIn("#3 新的入群申请", text)
+        self.assertIn("新的入群申请", text)
+        self.assertNotIn("#3", text)
         self.assertIn("来源：自主申请", text)
         self.assertIn("验证消息：答案", text)
         self.assertNotIn("member-secret", text)
@@ -357,17 +164,10 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("验证方式", text)
         self.assertEqual(format_apply_source("unknown-value"), "其他来源")
 
-    def test_review_keyboard_uses_commands(self) -> None:
-        keyboard = review_keyboard(4)
-        buttons = keyboard["content"]["rows"][0]["buttons"]
-        self.assertEqual(buttons[0]["action"]["data"], "/同意 4")
-        self.assertEqual(buttons[1]["action"]["data"], "/拒绝 4")
-        self.assertEqual(buttons[0]["action"]["permission"]["type"], 2)
-
     def test_keyboard_is_attached_to_markdown_payload(self) -> None:
         api = QQGroupManageAPI(object())
         api._request = AsyncMock(return_value={"id": "message-1"})
-        keyboard = review_keyboard(2)
+        keyboard = review_keyboard("a" * 32)
 
         asyncio.run(api.send_group_markdown("group-1", "申请内容", keyboard=keyboard))
 
@@ -582,6 +382,7 @@ class CoreTests(unittest.TestCase):
         )
         stored = []
         plugin = object.__new__(QQGroupAdminPlugin)
+        plugin._callback_admin_ids = lambda platform_id, group: ["admin-1"]
         plugin.config = {
             "enable_join_notice": True,
             "enable_join_reply_review": True,
@@ -590,7 +391,7 @@ class CoreTests(unittest.TestCase):
             get_platform_inst=lambda platform_id: SimpleNamespace(client=object())
         )
         plugin.storage = SimpleNamespace(
-            reserve_pending=lambda item: (stored.append(item) or ("reserved-1", 1)),
+            reserve_pending=lambda item: stored.append(item) or "reserved-1",
             bind_pending_message=lambda pending_key, message_id: message_id,
             remove_pending=lambda pending_key: None,
         )
@@ -697,7 +498,9 @@ class CoreTests(unittest.TestCase):
             "review_join_request_tool",
         )
         for name in tool_names:
-            self.assertEqual(signature(getattr(QQGroupAdminPlugin, name)).return_annotation, "str")
+            self.assertEqual(
+                signature(getattr(QQGroupAdminPlugin, name)).return_annotation, "str"
+            )
 
     def test_bot_sender_has_group_management_permission(self) -> None:
         class Storage:
@@ -1044,9 +847,7 @@ class CoreTests(unittest.TestCase):
             )
         )
 
-        self.assertFalse(
-            plugin.config["command_settings"]["enable_mute_command"]
-        )
+        self.assertFalse(plugin.config["command_settings"]["enable_mute_command"])
         self.assertFalse(plugin.config["enable_mute_command"])
         self.assertEqual(plugin.config.save_calls, 1)
         self.assertEqual(results[0].text, "禁言指令已关闭。")
@@ -1134,9 +935,7 @@ class CoreTests(unittest.TestCase):
     def test_native_admin_role_is_read_from_author_object(self) -> None:
         event = SimpleNamespace(
             message_obj=SimpleNamespace(
-                raw_message=SimpleNamespace(
-                    author=SimpleNamespace(member_role="admin")
-                )
+                raw_message=SimpleNamespace(author=SimpleNamespace(member_role="admin"))
             )
         )
         self.assertEqual(QQGroupAdminPlugin._qq_member_role(event), "admin")
@@ -1185,9 +984,7 @@ class CoreTests(unittest.TestCase):
         plugin._migrate_config_layout()
 
         self.assertEqual(plugin.config["config_layout_version"], 1)
-        self.assertFalse(
-            plugin.config["command_settings"]["enable_mute_command"]
-        )
+        self.assertFalse(plugin.config["command_settings"]["enable_mute_command"])
         self.assertEqual(
             plugin.config["command_settings"]["default_mute_duration"],
             "8分",
