@@ -775,10 +775,12 @@ class QQGroupAdminPlugin(Star):
             return True
 
         async def acknowledge(code: int) -> None:
+            # Use QQ's admin-only response for every rejected callback.
+            response_code = 0 if code == 0 else 5
             try:
                 # ACK is independent of the potentially slower approval request.
                 await asyncio.wait_for(
-                    api.acknowledge_interaction(interaction_id, code), 3
+                    api.acknowledge_interaction(interaction_id, response_code), 3
                 )
             except Exception:
                 if self._callback_guard.should_log_error("ack"):

@@ -148,7 +148,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.now += 2
         await self.plugin._handle_review_interaction("p", callback)
         self.assertEqual(self.api.review_join_request.await_count, 1)
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
 
     async def test_shared_callback_queries_native_admin_and_owner_roles(self):
         for role in ("admin", "owner"):
@@ -180,14 +180,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
             )
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         for error in (RuntimeError("11253: no API permission"), TimeoutError()):
             self.now += 120
             self.api.get_group_member_info.side_effect = error
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
             )
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.review_join_request.assert_not_awaited()
         self.assertIsNotNone(self.plugin.storage.get_pending("notice"))
         self.assertFalse(self.plugin._review_callbacks_inflight)
@@ -206,7 +206,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="qq-admin")
         )
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.assertEqual(self.api.get_group_member_info.await_count, 2)
         self.assertEqual(self.api.review_join_request.await_count, 1)
 
@@ -219,7 +219,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="qq-admin")
         )
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.review_join_request.assert_not_awaited()
 
     async def test_old_button_audience_cannot_bypass_server_authorization(self):
@@ -228,7 +228,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(audience=audience, sender="member")
             )
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
             self.api.review_join_request.assert_not_awaited()
             self.plugin.storage.add_group_admin("g", "plugin-admin")
             self.plugin.storage.put_pending("notice", self.pending)
@@ -246,7 +246,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender=sender)
             )
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.review_join_request.assert_not_awaited()
 
     async def test_plugin_admin_callback_is_allowed(self):
@@ -257,7 +257,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.api.review_join_request.assert_awaited_once()
         self.api.get_group_member_info.assert_not_awaited()
 
-    async def test_denied_clicks_return_code_four_for_two_minutes_without_requery(self):
+    async def test_denied_clicks_return_code_five_for_two_minutes_without_requery(self):
         self.api.get_group_member_info.return_value = {
             "member_openid": "member",
             "member_role": "member",
@@ -266,7 +266,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
             )
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.get_group_member_info.assert_awaited_once()
         self.api.review_join_request.assert_not_awaited()
         self.api.send_group_text.assert_not_awaited()
@@ -274,7 +274,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="member")
         )
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.get_group_member_info.assert_awaited_once()
         self.now += 1
         await self.plugin._handle_review_interaction(
@@ -306,7 +306,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="member")
         )
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.get_group_member_info.assert_awaited_once()
 
     async def test_more_than_twenty_users_can_be_checked_in_one_minute(self):
@@ -315,7 +315,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 "p", self.interaction(sender=f"member-{i}")
             )
         self.assertEqual(self.api.get_group_member_info.await_count, 25)
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.send_group_text.assert_not_awaited()
         await self.plugin._handle_review_interaction("p", self.interaction())
         self.api.review_join_request.assert_awaited_once()
@@ -353,7 +353,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(entered.wait(), 1)
                     await self.plugin._handle_review_interaction("p", callback)
             self.assertEqual(self.api.get_group_member_info.await_count, 2)
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
             tasks[0].cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await tasks[0]
@@ -392,7 +392,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         cases.append(("p", mismatch))
         for platform, callback in cases:
             await self.plugin._handle_review_interaction(platform, callback)
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.review_join_request.assert_not_awaited()
 
     async def test_feature_off_and_whitelist_are_enforced(self):
@@ -402,7 +402,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.plugin.config = config
             await self.plugin._handle_review_interaction("p", self.interaction())
-            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         self.api.review_join_request.assert_not_awaited()
 
     async def test_expired_or_deleted_token_cannot_target_new_application(self):
@@ -414,7 +414,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.plugin._handle_review_interaction("p", self.interaction())
         self.api.review_join_request.assert_not_awaited()
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
 
     async def test_concurrent_clicks_ack_promptly_and_call_approval_once(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -430,7 +430,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         await entered.wait()
         await self.plugin._handle_review_interaction("p", self.interaction("decline"))
-        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 5)
         release.set()
         await first
         self.assertEqual(self.api.review_join_request.await_count, 1)
@@ -560,10 +560,10 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ack_api_uses_new_domain_and_encoded_interaction_id(self):
         api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
-        await api.acknowledge_interaction("id/unsafe", 4)
+        await api.acknowledge_interaction("id/unsafe", 5)
         call = api.client.api._http.request.await_args
         self.assertIn("api.bot.qq.com/interactions/id%2Funsafe", call.args[0].url)
-        self.assertEqual(call.kwargs["json"], {"code": 4})
+        self.assertEqual(call.kwargs["json"], {"code": 5})
 
     async def test_member_info_api_encodes_group_and_member_ids(self):
         api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
