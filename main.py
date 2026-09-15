@@ -23,7 +23,7 @@ GROUP_AND_C2C_INTENT = 1 << 25
 INTERACTION_INTENT = 1 << 26
 LIFECYCLE_INTENTS = GROUP_MEMBER_INTENT | GROUP_AND_C2C_INTENT | INTERACTION_INTENT
 REVIEW_CALLBACK_RE = re.compile(
-    r"^qqga:([0-9a-f]{32}):(approve|decline):(native|assigned)$"
+    r"^qqga:([0-9a-f]{32}):(approve|decline):(native|assigned|shared)$"
 )
 LIFECYCLE_EVENTS = (
     "group_join_request",
@@ -224,19 +224,12 @@ def format_apply_source(value: Any) -> str:
     return APPLY_SOURCE_NAMES.get(source.lower(), "其他来源")
 
 
-def review_keyboard(token: str, admin_ids: list[str] | None = None) -> dict[str, Any]:
-    """Native QQ admins and explicitly assigned admins use separate permission gates.
+def review_keyboard(token: str) -> dict[str, Any]:
+    """Share two callback buttons; authorize the actual clicker on the server."""
 
-    QQ's signed interaction carries the clicker ID, but no native member role.
-    The native buttons therefore rely on QQ's permission.type=1 enforcement.
-    """
-
-    def button(action: str, label: str, audience: str) -> dict[str, Any]:
-        permission: dict[str, Any] = {"type": 1}
-        if audience == "assigned":
-            permission = {"type": 0, "specify_user_ids": admin_ids}
+    def button(action: str, label: str) -> dict[str, Any]:
         return {
-            "id": f"qqga-{action}-{audience}",
+            "id": f"qqga-{action}-shared",
             "render_data": {
                 "label": label,
                 "visited_label": label,
@@ -244,8 +237,8 @@ def review_keyboard(token: str, admin_ids: list[str] | None = None) -> dict[str,
             },
             "action": {
                 "type": 1,
-                "permission": permission,
-                "data": f"qqga:{token}:{action}:{audience}",
+                "permission": {"type": 2},
+                "data": f"qqga:{token}:{action}:shared",
                 "unsupport_tips": "请更新 QQ 客户端，或引用申请通知回复 同意 / 拒绝",
             },
         }
@@ -253,20 +246,11 @@ def review_keyboard(token: str, admin_ids: list[str] | None = None) -> dict[str,
     rows = [
         {
             "buttons": [
-                button("approve", "同意", "native"),
-                button("decline", "拒绝", "native"),
+                button("approve", "同意"),
+                button("decline", "拒绝"),
             ]
         }
     ]
-    if admin_ids:
-        rows.append(
-            {
-                "buttons": [
-                    button("approve", "授权群管同意", "assigned"),
-                    button("decline", "授权群管拒绝", "assigned"),
-                ]
-            }
-        )
     return {"content": {"rows": rows}}
 
 
@@ -342,7 +326,7 @@ def format_group_admin_help(default_duration: str) -> str:
         "纯数字按分钟处理，例如 `30` 表示 **30分钟**\n\n"
         "## 入群审批\n\n"
         "点击申请通知下方的同意 / 拒绝按钮，直接完成审批。\n\n"
-        "QQ 原生群管使用第一行；AstrBot 管理员和插件群管使用授权群管按钮。\n\n"
+        "群主、QQ 群管理员、AstrBot 管理员和插件群管共用同意 / 拒绝按钮。\n\n"
         "拒绝并填写理由时，可引用申请通知回复 `拒绝 理由`。\n\n"
         "---\n\n"
         "💡 AstrBot 管理员拥有全局权限；插件群管和 QQ 群主/管理员拥有本群普通群管权限。"
@@ -725,7 +709,7 @@ class QQGroupAdminPlugin(Star):
         if review_enabled:
             content += (
                 "\n\n点击下方按钮直接审批；拒绝并填写理由时，可引用本消息回复：拒绝 理由。"
-                "\nQQ 原生群管使用第一行；AstrBot 管理员和插件群管使用授权群管按钮。"
+                "\n审批按钮由群主、QQ 群管理员、AstrBot 管理员和插件群管共用。"
             )
         try:
             api = QQGroupManageAPI(platform.client)
@@ -733,10 +717,7 @@ class QQGroupAdminPlugin(Star):
                 result = await api.send_group_markdown(
                     group_openid,
                     content,
-                    keyboard=review_keyboard(
-                        stored["callback_token"],
-                        self._callback_admin_ids(platform_id, group_openid),
-                    )
+                    keyboard=review_keyboard(stored["callback_token"])
                     if review_enabled
                     else None,
                 )
@@ -778,12 +759,7 @@ class QQGroupAdminPlugin(Star):
     async def _handle_review_interaction(
         self, platform_id: str, interaction: Any
     ) -> bool:
-        """Consume only our SDK button callbacks, leaving other interactions untouched.
-
-        Native-role authorization is enforced by QQ on the original type=1
-        permission button; the authenticated callback has no native role field.
-        Assigned admins are also checked against current server-side settings.
-        """
+        """Consume our callbacks and authorize the clicker, including on old buttons."""
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
         data = str(getattr(resolved, "button_data", "") or "")
         if not data.startswith("qqga:"):
@@ -838,16 +814,36 @@ class QQGroupAdminPlugin(Star):
         ):
             await acknowledge(4)
             return True
-        if audience == "assigned" and sender not in self._callback_admin_ids(
-            platform_id, group
-        ):
-            await acknowledge(4)
-            return True
         if token in self._review_callbacks_inflight:
             await acknowledge(2)
             return True
         self._review_callbacks_inflight.add(token)
         try:
+            if sender not in self._callback_admin_ids(platform_id, group):
+                # Interactions carry no native role. Never trust the button audience
+                # or a role cached from an earlier message as authorization.
+                try:
+                    member = await asyncio.wait_for(
+                        api.get_group_member_info(group, sender), 2
+                    )
+                except Exception:
+                    logger.exception(
+                        "[%s] 无法验证按钮点击者身份，请检查获取群成员信息接口权限",
+                        PLUGIN_NAME,
+                    )
+                    await acknowledge(4)
+                    return True
+                if (
+                    not isinstance(member, dict)
+                    or member.get("member_openid") != sender
+                    or member.get("member_role") not in {"owner", "admin"}
+                ):
+                    await acknowledge(4)
+                    return True
+            # A quoted reply may have resolved the request during the role lookup.
+            if self.storage.find_pending_by_token(token) is None:
+                await acknowledge(3)
+                return True
             await acknowledge(0)
             try:
                 await api.review_join_request(

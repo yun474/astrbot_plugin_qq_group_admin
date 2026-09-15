@@ -67,8 +67,7 @@
 
 | 按钮 | 权限 |
 | --- | --- |
-| 第一行「同意 / 拒绝」 | QQ 原生群主、群管理员 |
-| 第二行「授权群管同意 / 授权群管拒绝」 | AstrBot 管理员、当前群插件群管；未配置时不显示此行 |
+| 同意 / 拒绝（同一行） | QQ 原生群主、群管理员、AstrBot 管理员和当前群插件群管共用 |
 
 点击「拒绝」不填写理由。成功处理后旧按钮失效；处理中的重复点击不会重复提交。
 
@@ -83,8 +82,9 @@
 <details>
 <summary>按钮权限与事件订阅</summary>
 
-- QQ 原生群管按钮由 QQ 平台限制为管理员可点击；授权群管按钮限制指定用户，后台还会检查当前权限名单。
-- 新增授权群管不会更新已发送按钮的用户列表；已撤销权限的用户会被后台拒绝。
+- 两个按钮共用，后台按实际点击者校验权限；普通成员点击不会执行审批。
+- AstrBot 管理员与插件群管按当前名单校验，新增或撤销权限对已发送的共享按钮同样生效。
+- QQ 原生群主、群管理员通过[获取群成员信息接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)实时核验。该接口目前需内邀权限，限频 30 QPM；未开通、超时或查询失败时拒绝审批，可配置为插件群管，或引用通知回复。旧版双行回调按钮也会执行此校验。
 - WebSocket 自动补充相关 Intents；Webhook 需订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`INTERACTION_CREATE`。
 - 按钮遵循 [QQ 官方回调协议](https://github.com/tencent-connect/bot-docs/blob/645787a45937e5d9c4f0f61afefdffde0f38696e/docs/develop/api-v2/server-inter/message/trans/msg-btn.md)，使用随机标识绑定申请，并校验平台、群和有效期。
 

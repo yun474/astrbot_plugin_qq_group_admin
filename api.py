@@ -59,6 +59,11 @@ class QQGroupManageAPI:
             f"/v2/groups/{group_id}/restrict_chat_setting",
         )
 
+    async def get_group_member_info(self, group_openid: str, member_openid: str) -> Any:
+        group_id = quote(group_openid, safe="")
+        member_id = quote(member_openid, safe="")
+        return await self._request("GET", f"/v2/groups/{group_id}/members/{member_id}")
+
     async def list_join_requests(
         self,
         group_openid: str,

@@ -86,6 +86,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             send_group_text=AsyncMock(),
             get_mute_status=AsyncMock(return_value={}),
             list_join_requests=AsyncMock(return_value={"list": []}),
+            get_group_member_info=AsyncMock(return_value={"member_role": "member"}),
         )
         patcher = patch(
             "astrbot_plugin_qq_group_admin.main.QQGroupManageAPI", return_value=self.api
@@ -103,7 +104,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.storage.put_pending("notice", self.pending)
 
     def interaction(
-        self, action="approve", audience="assigned", sender="astr-admin", **extra
+        self, action="approve", audience="shared", sender="astr-admin", **extra
     ):
         payload = {
             "id": "interaction-id",
@@ -123,13 +124,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         payload.update(extra)
         return Interaction(None, "outer-event", payload)
 
-    async def test_assigned_callback_approves_once_and_survives_storage_reload(self):
+    async def test_shared_callback_approves_once_and_survives_storage_reload(self):
         self.plugin.storage = PluginStorage(self.plugin.storage.path)
         callback = self.interaction()
         self.assertTrue(await self.plugin._handle_review_interaction("p", callback))
         self.api.review_join_request.assert_awaited_once_with(
             "g", "applicant", "request", approve=True
         )
+        self.api.get_group_member_info.assert_not_awaited()
         self.api.send_group_text.assert_awaited_once_with(
             "g", "已同意入群申请。", event_id="outer-event"
         )
@@ -138,17 +140,91 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.review_join_request.await_count, 1)
         self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
 
-    async def test_native_callback_uses_qq_admin_only_button(self):
-        buttons = review_keyboard(self.token)["content"]["rows"][0]["buttons"]
-        self.assertTrue(all(b["action"]["permission"]["type"] == 1 for b in buttons))
-        await self.plugin._handle_review_interaction(
-            "p", self.interaction("decline", "native", "qq-admin")
-        )
-        self.api.review_join_request.assert_awaited_once_with(
-            "g", "applicant", "request", approve=False
-        )
+    async def test_shared_callback_queries_native_admin_and_owner_roles(self):
+        for role in ("admin", "owner"):
+            self.plugin.storage.put_pending("notice", self.pending)
+            self.api.get_group_member_info.return_value = {
+                "member_openid": "qq-admin",
+                "member_role": role,
+            }
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction("decline", sender="qq-admin")
+            )
+            self.api.get_group_member_info.assert_awaited_with("g", "qq-admin")
+            self.api.review_join_request.assert_awaited_with(
+                "g", "applicant", "request", approve=False
+            )
+        self.assertEqual(self.api.review_join_request.await_count, 2)
 
-    async def test_assigned_callback_denies_removed_or_ordinary_admin(self):
+    async def test_role_lookup_fails_closed(self):
+        for result in (
+            None,
+            {},
+            {"member_openid": "member", "member_role": "member"},
+            {"member_openid": "someone-else", "member_role": "owner"},
+            {"member_openid": "member", "member_role": "unknown"},
+        ):
+            self.api.get_group_member_info.return_value = result
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(sender="member")
+            )
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        for error in (RuntimeError("11253: no API permission"), TimeoutError()):
+            self.api.get_group_member_info.side_effect = error
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(sender="member")
+            )
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.review_join_request.assert_not_awaited()
+        self.assertIsNotNone(self.plugin.storage.get_pending("notice"))
+        self.assertFalse(self.plugin._review_callbacks_inflight)
+
+    async def test_native_role_is_rechecked_after_demotion(self):
+        self.api.get_group_member_info.return_value = {
+            "member_openid": "qq-admin",
+            "member_role": "admin",
+        }
+        self.api.review_join_request.side_effect = RuntimeError("retry later")
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="qq-admin")
+        )
+        self.api.get_group_member_info.return_value["member_role"] = "member"
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="qq-admin")
+        )
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.assertEqual(self.api.get_group_member_info.await_count, 2)
+        self.assertEqual(self.api.review_join_request.await_count, 1)
+
+    async def test_resolved_request_during_role_lookup_is_not_approved_again(self):
+        async def get_member(*args):
+            self.plugin.storage.remove_pending("notice")
+            return {"member_openid": "qq-admin", "member_role": "admin"}
+
+        self.api.get_group_member_info.side_effect = get_member
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="qq-admin")
+        )
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_old_button_audience_cannot_bypass_server_authorization(self):
+        for audience in ("native", "assigned"):
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(audience=audience, sender="member")
+            )
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+            self.api.review_join_request.assert_not_awaited()
+            self.plugin.storage.add_group_admin("g", "plugin-admin")
+            self.plugin.storage.put_pending("notice", self.pending)
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(audience=audience, sender="plugin-admin")
+            )
+            self.api.review_join_request.assert_awaited_once()
+            self.api.review_join_request.reset_mock()
+            self.plugin.storage.put_pending("notice", self.pending)
+
+    async def test_shared_callback_denies_removed_or_ordinary_admin(self):
         self.plugin.storage.add_group_admin("g", "plugin-admin")
         self.plugin.storage.remove_group_admin("g", "plugin-admin")
         for sender in ("member", "plugin-admin"):
@@ -164,6 +240,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             "p", self.interaction(sender="plugin-admin")
         )
         self.api.review_join_request.assert_awaited_once()
+        self.api.get_group_member_info.assert_not_awaited()
 
     async def test_cross_scope_private_and_mismatched_buttons_are_denied(self):
         cases = [
@@ -350,16 +427,26 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("api.bot.qq.com/interactions/id%2Funsafe", call.args[0].url)
         self.assertEqual(call.kwargs["json"], {"code": 4})
 
+    async def test_member_info_api_encodes_group_and_member_ids(self):
+        api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
+        await api.get_group_member_info("group/unsafe", "member/unsafe")
+        route = api.client.api._http.request.await_args.args[0]
+        self.assertEqual(route.method, "GET")
+        self.assertIn(
+            "api.bot.qq.com/v2/groups/group%2Funsafe/members/member%2Funsafe", route.url
+        )
+
     def test_buttons_are_callbacks_and_notification_markdown_is_escaped(self):
-        rows = review_keyboard(self.token, ["astr-admin"])["content"]["rows"]
+        rows = review_keyboard(self.token)["content"]["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            [b["render_data"]["label"] for b in rows[0]["buttons"]], ["同意", "拒绝"]
+        )
         for row in rows:
             for button in row["buttons"]:
                 self.assertEqual(button["action"]["type"], 1)
+                self.assertEqual(button["action"]["permission"], {"type": 2})
                 self.assertNotIn("enter", button["action"])
-        self.assertEqual(
-            rows[1]["buttons"][0]["action"]["permission"],
-            {"type": 0, "specify_user_ids": ["astr-admin"]},
-        )
         text = format_request(
             {
                 "username": "[假按钮](mqqapi://x)",
