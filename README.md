@@ -2,7 +2,7 @@
 
 # 🛡️ QQ 官方群管理
 
-**入群有人迎，申请点一下，群聊管理轻松一点。**
+**AstrBot适用的QQ官方机器人群管理插件**
 
 ✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 · WebSocket / Webhook ✨
 
@@ -65,7 +65,7 @@
 
 **点击后直接审批并在群内反馈，不需要再发送指令。**
 
-| 按钮 | 谁能用 |
+| 按钮 | 权限 |
 | --- | --- |
 | 第一行「同意 / 拒绝」 | QQ 原生群主、群管理员 |
 | 第二行「授权群管同意 / 授权群管拒绝」 | AstrBot 管理员、当前群插件群管；未配置时不显示此行 |
@@ -132,22 +132,7 @@
 
 欢迎文案可以写成 `欢迎 {member_at} 加入群聊！`；退群文案可以搭配 `{member_avatar}` 与 `有成员退出了群聊。`。头像不可用时会省略，Markdown 发送失败时降级为普通文本。
 
-<details>
-<summary>🧰 数据备份与开发验证</summary>
 
-群管、分群开关和待审映射保存在 `data/plugin_data/astrbot_plugin_qq_group_admin/state.json`。待审映射默认有效期 30 天，审批前会清理过期项；备份时保存该文件即可。
-
-已在 AstrBot **4.26.8** 与 **4.28.1 源码环境**通过单元测试，尚未完成真实 QQ 群联调；测试版本不等于最低兼容版本。旧版适配器可能缺少原生群管角色字段。
-
-在插件父目录运行：
-
-```bash
-python -m unittest discover -s astrbot_plugin_qq_group_admin/tests -v
-ruff check astrbot_plugin_qq_group_admin
-ruff format --check astrbot_plugin_qq_group_admin
-```
-
-</details>
 
 ---
 
