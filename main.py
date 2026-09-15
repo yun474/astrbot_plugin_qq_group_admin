@@ -14,6 +14,7 @@ from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .api import QQGroupManageAPI
+from .callback_guard import ReviewCallbackGuard
 from .storage import PluginStorage
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
@@ -376,6 +377,7 @@ class QQGroupAdminPlugin(Star):
         self._parser_state_class: Any = None
         self._owned_parser_methods: dict[str, Any] = {}
         self._review_callbacks_inflight: set[str] = set()
+        self._callback_guard = ReviewCallbackGuard()
         self._install_parser_patch()
 
     def _install_parser_patch(self) -> None:
@@ -779,7 +781,8 @@ class QQGroupAdminPlugin(Star):
                     api.acknowledge_interaction(interaction_id, code), 3
                 )
             except Exception:
-                logger.exception("[%s] 回应审批按钮失败", PLUGIN_NAME)
+                if self._callback_guard.should_log_error("ack"):
+                    logger.exception("[%s] 回应审批按钮失败", PLUGIN_NAME)
 
         match = REVIEW_CALLBACK_RE.fullmatch(data)
         group = str(getattr(interaction, "group_openid", "") or "")
@@ -803,6 +806,13 @@ class QQGroupAdminPlugin(Star):
         ):
             await acknowledge(4)
             return True
+        assigned_admin = sender in self._callback_admin_ids(platform_id, group)
+        denial = self._callback_guard.check_click(
+            platform_id, group, sender, assigned_admin=assigned_admin
+        )
+        if denial is not None:
+            await acknowledge(denial)
+            return True
         matched = self.storage.find_pending_by_token(token)
         if matched is None:
             await acknowledge(3)  # Completed, expired or from a removed notification.
@@ -819,25 +829,32 @@ class QQGroupAdminPlugin(Star):
             return True
         self._review_callbacks_inflight.add(token)
         try:
-            if sender not in self._callback_admin_ids(platform_id, group):
+            if not assigned_admin:
                 # Interactions carry no native role. Never trust the button audience
                 # or a role cached from an earlier message as authorization.
+                if not self._callback_guard.start_lookup():
+                    await acknowledge(2)
+                    return True
                 try:
                     member = await asyncio.wait_for(
                         api.get_group_member_info(group, sender), 2
                     )
                 except Exception:
-                    logger.exception(
-                        "[%s] 无法验证按钮点击者身份，请检查获取群成员信息接口权限",
-                        PLUGIN_NAME,
-                    )
+                    if self._callback_guard.should_log_error("lookup"):
+                        logger.exception(
+                            "[%s] 无法验证按钮点击者身份，请检查获取群成员信息接口权限",
+                            PLUGIN_NAME,
+                        )
                     await acknowledge(4)
                     return True
+                finally:
+                    self._callback_guard.finish_lookup()
                 if (
                     not isinstance(member, dict)
                     or member.get("member_openid") != sender
                     or member.get("member_role") not in {"owner", "admin"}
                 ):
+                    self._callback_guard.remember_denied(platform_id, group, sender)
                     await acknowledge(4)
                     return True
             # A quoted reply may have resolved the request during the role lookup.

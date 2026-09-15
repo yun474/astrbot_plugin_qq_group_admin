@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from astrbot.api.message_components import Plain, Reply
 from astrbot_plugin_qq_group_admin.api import QQGroupManageAPI
+from astrbot_plugin_qq_group_admin.callback_guard import ReviewCallbackGuard
 from astrbot_plugin_qq_group_admin.main import (
     INTERACTION_INTENT,
     QQGroupAdminPlugin,
@@ -62,6 +63,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.config = {}
         self.plugin.storage = PluginStorage(Path(self.tmp.name) / "state.json")
         self.plugin._review_callbacks_inflight = set()
+        self.plugin._callback_guard = ReviewCallbackGuard()
+        self.now = 1000.0
+        clock = patch(
+            "astrbot_plugin_qq_group_admin.callback_guard.monotonic",
+            side_effect=lambda: self.now,
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
         self.plugin._patched = {}
         self.plugin._patch_task = None
         self.plugin._parser_state_class = None
@@ -136,12 +145,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             "g", "已同意入群申请。", event_id="outer-event"
         )
         self.assertIsNone(self.plugin.storage.get_pending("notice"))
+        self.now += 2
         await self.plugin._handle_review_interaction("p", callback)
         self.assertEqual(self.api.review_join_request.await_count, 1)
         self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 3)
 
     async def test_shared_callback_queries_native_admin_and_owner_roles(self):
         for role in ("admin", "owner"):
+            self.now += 2
             self.plugin.storage.put_pending("notice", self.pending)
             self.api.get_group_member_info.return_value = {
                 "member_openid": "qq-admin",
@@ -164,12 +175,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             {"member_openid": "someone-else", "member_role": "owner"},
             {"member_openid": "member", "member_role": "unknown"},
         ):
+            self.now += 30
             self.api.get_group_member_info.return_value = result
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
             )
             self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
         for error in (RuntimeError("11253: no API permission"), TimeoutError()):
+            self.now += 30
             self.api.get_group_member_info.side_effect = error
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(sender="member")
@@ -189,6 +202,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             "p", self.interaction(sender="qq-admin")
         )
         self.api.get_group_member_info.return_value["member_role"] = "member"
+        self.now += 2
         await self.plugin._handle_review_interaction(
             "p", self.interaction(sender="qq-admin")
         )
@@ -210,6 +224,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_button_audience_cannot_bypass_server_authorization(self):
         for audience in ("native", "assigned"):
+            self.now += 2
             await self.plugin._handle_review_interaction(
                 "p", self.interaction(audience=audience, sender="member")
             )
@@ -241,6 +256,125 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.api.review_join_request.assert_awaited_once()
         self.api.get_group_member_info.assert_not_awaited()
+
+    async def test_denied_spam_uses_native_popup_without_more_queries_or_messages(self):
+        self.api.get_group_member_info.return_value = {
+            "member_openid": "member",
+            "member_role": "member",
+        }
+        for _ in range(50):
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(sender="member")
+            )
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.get_group_member_info.assert_awaited_once()
+        self.api.review_join_request.assert_not_awaited()
+        self.api.send_group_text.assert_not_awaited()
+        self.now += 30
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.assertEqual(self.api.get_group_member_info.await_count, 2)
+
+    async def test_new_plugin_admin_bypasses_cached_denial(self):
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.plugin.storage.add_group_admin("g", "member")
+        self.now += 2
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.api.get_group_member_info.assert_awaited_once()
+        self.api.review_join_request.assert_awaited_once()
+
+    async def test_same_user_cooldown_covers_different_requests(self):
+        self.api.get_group_member_info.side_effect = TimeoutError()
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.token = "b" * 32
+        self.plugin.storage.put_pending(
+            "notice-2", {**self.pending, "callback_token": self.token}
+        )
+        await self.plugin._handle_review_interaction(
+            "p", self.interaction(sender="member")
+        )
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+        self.api.get_group_member_info.assert_awaited_once()
+
+    async def test_query_budget_rejects_many_users_but_keeps_assigned_admin_access(
+        self,
+    ):
+        for i in range(25):
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(sender=f"member-{i}")
+            )
+        self.assertEqual(self.api.get_group_member_info.await_count, 20)
+        self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+        self.api.send_group_text.assert_not_awaited()
+        await self.plugin._handle_review_interaction("p", self.interaction())
+        self.api.review_join_request.assert_awaited_once()
+
+    async def test_lookup_concurrency_is_bounded_and_cancelled_work_releases_slots(
+        self,
+    ):
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def slow_lookup(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                entered.set()
+            await release.wait()
+            return {"member_openid": args[1], "member_role": "member"}
+
+        self.api.get_group_member_info.side_effect = slow_lookup
+        tasks = []
+        try:
+            for i in range(3):
+                self.token = f"{i:032x}"
+                self.plugin.storage.put_pending(
+                    f"notice-{i}", {**self.pending, "callback_token": self.token}
+                )
+                callback = self.interaction(sender=f"member-{i}")
+                if i < 2:
+                    tasks.append(
+                        asyncio.create_task(
+                            self.plugin._handle_review_interaction("p", callback)
+                        )
+                    )
+                else:
+                    await asyncio.wait_for(entered.wait(), 1)
+                    await self.plugin._handle_review_interaction("p", callback)
+            self.assertEqual(self.api.get_group_member_info.await_count, 2)
+            self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
+            tasks[0].cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await tasks[0]
+            self.assertEqual(self.plugin._callback_guard._active_lookups, 1)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertEqual(self.plugin._callback_guard._active_lookups, 0)
+        self.assertFalse(self.plugin._review_callbacks_inflight)
+
+    async def test_repeated_lookup_and_ack_errors_log_once_per_minute(self):
+        self.api.get_group_member_info.side_effect = TimeoutError()
+        self.api.acknowledge_interaction.side_effect = RuntimeError("ack failed")
+        with patch("astrbot_plugin_qq_group_admin.main.logger.exception") as log:
+            for i in range(4):
+                await self.plugin._handle_review_interaction(
+                    "p", self.interaction(sender=f"member-{i}")
+                )
+            self.assertEqual(log.call_count, 2)
+            self.now += 60
+            await self.plugin._handle_review_interaction(
+                "p", self.interaction(sender="member-0")
+            )
+            self.assertEqual(log.call_count, 4)
+        self.assertEqual(self.plugin._callback_guard._active_lookups, 0)
 
     async def test_cross_scope_private_and_mismatched_buttons_are_denied(self):
         cases = [
