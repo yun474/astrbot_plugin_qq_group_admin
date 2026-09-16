@@ -709,10 +709,7 @@ class QQGroupAdminPlugin(Star):
             group_umo,
         )
         if review_enabled:
-            content += (
-                "\n\n点击下方按钮直接审批；拒绝并填写理由时，可引用本消息回复：拒绝 理由。"
-                "\n审批按钮由群主、QQ 群管理员、AstrBot 管理员和插件群管共用。"
-            )
+            content += "\n\n点击下方按钮直接审批；或引用本消息：同意/拒绝 理由。"
         try:
             api = QQGroupManageAPI(platform.client)
             try:
