@@ -613,97 +613,6 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.api.review_join_request.assert_not_awaited()
 
-    async def test_quoted_native_request_id_locates_pending_without_message_id(self):
-        request_id = "native-request_123.abc"
-        self.pending["join_request_id"] = request_id
-        self.plugin._review = AsyncMock()
-        for markdown in (False, True):
-            content = format_request(self.pending, markdown=markdown)
-            for quoted in (
-                Reply(id="", message_str=content),
-                Reply(id="unmatched-qq-id", text=content),
-                Reply(id="", chain=[Plain(content.replace("\n", "\r\n"))]),
-            ):
-                self.plugin.storage.put_pending("notice", self.pending)
-                event = Event(astr_admin=True, reply=quoted)
-                await self.plugin.reply_review(event)
-                self.plugin._review.assert_awaited_with(
-                    event, "g", "applicant", request_id, True, ""
-                )
-                self.assertEqual(event.sent, ["已同意入群申请。"])
-                self.assertTrue(event.stopped)
-        self.plugin.storage.put_pending("notice", self.pending)
-        event = Event(astr_admin=True)
-        event.message_obj.raw_message = NS(
-            raw_data={
-                "message_type": 103,
-                "msg_elements": [{"content": content}],
-            }
-        )
-        await self.plugin.reply_review(event)
-        self.assertEqual(event.sent, ["已同意入群申请。"])
-
-    async def test_request_id_lookup_cannot_cross_platform_or_group(self):
-        self.plugin.storage.remove_pending("notice")
-        for key, override in (
-            ("other-platform", {"platform_id": "other"}),
-            ("other-group", {"group_openid": "other"}),
-        ):
-            self.plugin.storage.put_pending(key, {**self.pending, **override})
-        event = Event(
-            astr_admin=True, reply=Reply(id="", message_str="申请 ID：request")
-        )
-        await self.plugin.reply_review(event)
-        self.api.review_join_request.assert_not_awaited()
-        self.assertTrue(event.stopped)
-        # Identical IDs in other scopes must not hide the correct scoped record.
-        self.plugin.storage.put_pending("notice", self.pending)
-        await self.plugin.reply_review(event)
-        self.api.review_join_request.assert_awaited_once_with(
-            "g", "applicant", "request", approve=True, reject_reason=""
-        )
-        self.assertIsNotNone(self.plugin.storage.get_pending("other-platform"))
-        self.assertIsNotNone(self.plugin.storage.get_pending("other-group"))
-
-    async def test_request_id_lookup_checks_permission_expiry_and_ambiguity(self):
-        for case in ("denied", "expired", "unknown", "ambiguous"):
-            self.plugin.storage.put_pending("notice", self.pending)
-            content = "申请 ID：request"
-            if case == "expired":
-                self.plugin.storage.data["pending"]["notice"]["stored_at"] = (
-                    datetime.now(timezone.utc) - timedelta(days=31)
-                ).isoformat()
-            elif case == "unknown":
-                content = "申请 ID：unknown"
-            elif case == "ambiguous":
-                content += "\n申请 ID：other"
-            event = Event(
-                astr_admin=case != "denied", reply=Reply(id="", message_str=content)
-            )
-            await self.plugin.reply_review(event)
-            self.assertTrue(event.stopped)
-            self.assertTrue(event.sent)
-        self.api.review_join_request.assert_not_awaited()
-
-    async def test_message_id_takes_precedence_over_text_request_id(self):
-        self.plugin.storage.put_pending(
-            "other-notice",
-            {
-                **self.pending,
-                "join_request_id": "other-request",
-                "member_openid": "other-member",
-            },
-        )
-        event = Event(
-            astr_admin=True,
-            reply=Reply(id="notice", message_str="申请 ID：other-request"),
-        )
-        await self.plugin.reply_review(event)
-        self.api.review_join_request.assert_awaited_once_with(
-            "g", "applicant", "request", approve=True, reject_reason=""
-        )
-        self.assertIsNotNone(self.plugin.storage.get_pending("other-notice"))
-
     async def test_ordinary_messages_and_disabled_scopes_are_not_consumed(self):
         for event, config in (
             (Event(astr_admin=True), {}),
@@ -715,6 +624,159 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin.reply_review(event)
             self.assertFalse(event.stopped)
             self.assertEqual(event.sent, [])
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_reference_index_is_saved_from_notification_response_and_survives_reload(
+        self,
+    ):
+        for fallback in (False, True):
+            for message_id in ("sent-message", ""):
+                for object_response in (False, True):
+                    with self.subTest(
+                        fallback=fallback,
+                        message_id=message_id,
+                        object_response=object_response,
+                    ):
+                        self.plugin.storage.remove_pending("notice")
+                        response = {
+                            "id": message_id,
+                            "ext_info": {"ref_idx": "REFIDX_a+/b=="},
+                        }
+                        if object_response:
+                            response = NS(
+                                id=message_id, ext_info=NS(ref_idx="REFIDX_a+/b==")
+                            )
+                        self.api.send_group_markdown = AsyncMock(return_value=response)
+                        self.api.send_group_text = AsyncMock(return_value=response)
+                        if fallback:
+                            self.api.send_group_markdown.side_effect = RuntimeError(
+                                "markdown unavailable"
+                            )
+                        await self.plugin._handle_join_request_event("p", self.pending)
+                        sent = (
+                            self.api.send_group_text
+                            if fallback
+                            else self.api.send_group_markdown
+                        )
+                        self.assertNotIn("申请 ID", sent.await_args.args[1])
+                        self.assertNotIn("申请 ID", format_request(self.pending))
+                        self.plugin.storage = PluginStorage(self.plugin.storage.path)
+                        event = Event(astr_admin=True)
+                        event.message_obj.raw_message = {
+                            "message_scene": {
+                                "ext": [
+                                    "msg_idx=REFIDX_current",
+                                    "ref_msg_idx=REFIDX_a+/b==",
+                                ]
+                            }
+                        }
+                        await self.plugin.reply_review(event)
+                        self.assertEqual(event.sent, ["已同意入群申请。"])
+                        self.assertTrue(event.stopped)
+                        self.assertEqual(self.plugin.storage.data["pending"], {})
+
+    async def test_quote_reference_index_forms_work_without_reply_component(self):
+        for raw in (
+            {"message_scene": {"ext": ["ref_msg_idx=REFIDX_notice=="]}},
+            NS(message_scene=NS(ext=["ref_msg_idx=REFIDX_notice=="])),
+            NS(raw_data={"message_scene": {"ext": ["ref_msg_idx=REFIDX_notice=="]}}),
+            {"message_type": 103, "msg_elements": [{"msg_idx": "REFIDX_notice=="}]},
+            NS(
+                raw_data={
+                    "message_type": 103,
+                    "msg_elements": [NS(msg_idx="REFIDX_notice==")],
+                }
+            ),
+            {"message_reference": {"message_id": "REFIDX_notice=="}},
+        ):
+            self.plugin.storage.put_pending(
+                "notice", {**self.pending, "ref_idx": "REFIDX_notice=="}
+            )
+            event = Event(astr_admin=True, text="拒绝 理由")
+            event.message_obj.raw_message = raw
+            await self.plugin.reply_review(event)
+            self.assertEqual(event.sent, ["已拒绝入群申请。 理由：理由"])
+            self.assertTrue(event.stopped)
+        self.assertEqual(self.api.review_join_request.await_count, 6)
+
+    async def test_current_message_index_and_quoted_body_never_locate_application(self):
+        self.plugin.storage.bind_pending_message("notice", "notice", "REFIDX_notice==")
+        cases = (
+            (None, {"message_scene": {"ext": ["msg_idx=REFIDX_notice=="]}}),
+            (Reply(id="", message_str="申请 ID：request"), {}),
+            (Reply(id=""), {"message_scene": {"ext": ["msg_idx=REFIDX_notice=="]}}),
+            (
+                None,
+                {
+                    "message_type": 103,
+                    "msg_elements": [{"content": "申请 ID：request"}],
+                },
+            ),
+            (
+                None,
+                {
+                    "message_type": 103,
+                    "msg_elements": [
+                        {"msg_elements": [{"msg_idx": "REFIDX_notice=="}]}
+                    ],
+                },
+            ),
+            (None, {"message_scene": {"ext": ["ref_msg_idx=TMP_unmatched"]}}),
+        )
+        for index, (reply, raw) in enumerate(cases):
+            event = Event(astr_admin=True, reply=reply)
+            event.message_obj.raw_message = raw
+            await self.plugin.reply_review(event)
+            self.assertEqual(event.stopped, index != 0)
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_ref_lookup_is_scoped_and_rechecks_permission_and_retention(self):
+        self.plugin.storage.remove_pending("notice")
+        item = {**self.pending, "ref_idx": "REFIDX_notice=="}
+        self.plugin.storage.put_pending(
+            "foreign-platform", {**item, "platform_id": "other"}
+        )
+        self.plugin.storage.put_pending(
+            "foreign-group", {**item, "group_openid": "other"}
+        )
+        for case in ("foreign_only", "denied", "expired", "success"):
+            if case != "foreign_only":
+                self.plugin.storage.put_pending("notice", item)
+            if case == "expired":
+                self.plugin.storage.data["pending"]["notice"]["stored_at"] = (
+                    datetime.now(timezone.utc) - timedelta(days=31)
+                ).isoformat()
+            event = Event(
+                astr_admin=case != "denied", reply=Reply(id="REFIDX_notice==")
+            )
+            await self.plugin.reply_review(event)
+            self.assertTrue(event.stopped)
+            if case != "success":
+                self.api.review_join_request.assert_not_awaited()
+        self.api.review_join_request.assert_awaited_once()
+        self.assertIsNotNone(self.plugin.storage.get_pending("foreign-platform"))
+        self.assertIsNotNone(self.plugin.storage.get_pending("foreign-group"))
+
+    async def test_conflicting_reference_indices_do_not_select_either_request(self):
+        self.plugin.storage.bind_pending_message("notice", "notice", "REFIDX_first")
+        self.plugin.storage.put_pending(
+            "second",
+            {
+                **self.pending,
+                "ref_idx": "REFIDX_second",
+                "join_request_id": "request-2",
+            },
+        )
+        for reply in (None, Reply(id="notice")):
+            event = Event(astr_admin=True, reply=reply)
+            event.message_obj.raw_message = {
+                "message_type": 103,
+                "message_scene": {"ext": ["ref_msg_idx=REFIDX_first"]},
+                "msg_elements": [{"msg_idx": "REFIDX_second"}],
+            }
+            await self.plugin.reply_review(event)
+            self.assertIn("未唯一匹配", event.sent[0])
+            self.assertTrue(event.stopped)
         self.api.review_join_request.assert_not_awaited()
 
     async def test_reply_send_failure_still_stops_event_and_does_not_restore_request(
@@ -753,7 +815,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         for platform in ("qq_official", "qq_official_webhook"):
             for case in (
                 "success",
-                "request_id",
+                "ref_idx",
                 "missing_id",
                 "unknown_id",
                 "expired",
@@ -766,7 +828,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                     self.api.review_join_request.reset_mock(side_effect=True)
                     reply_id = {
                         "missing_id": "",
-                        "request_id": "",
+                        "ref_idx": "",
                         "unknown_id": "unknown",
                     }.get(case, "notice")
                     message = AstrBotMessage()
@@ -778,11 +840,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                     )
                     message.sender = MessageMember("sender", "tester")
                     message.message = [Reply(id=reply_id), Plain(text="同意")]
-                    if case == "request_id":
-                        message.message[0].message_str = format_request(
-                            self.pending, markdown=True
-                        )
                     message.raw_message = {"author": {"member_role": "member"}}
+                    if case == "ref_idx":
+                        message.raw_message["message_scene"] = {
+                            "ext": ["ref_msg_idx=REFIDX_notice=="]
+                        }
+                        self.plugin.storage.bind_pending_message(
+                            "notice", "notice", "REFIDX_notice=="
+                        )
                     event = AstrMessageEvent(
                         "同意", message, PlatformMetadata(platform, "test", "p"), "g"
                     )
@@ -819,7 +884,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                             pass
                     event.send.assert_awaited_once()
                     self.assertTrue(event.is_stopped())
-                    if case in {"success", "request_id", "api_error"}:
+                    if case in {"success", "ref_idx", "api_error"}:
                         self.api.review_join_request.assert_awaited_once()
                     else:
                         self.api.review_join_request.assert_not_awaited()

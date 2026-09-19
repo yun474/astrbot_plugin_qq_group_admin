@@ -104,16 +104,39 @@ class PluginStorage:
         self.save()
         return key
 
-    def bind_pending_message(self, pending_key: str, message_id: str) -> str:
-        """Re-key a reserved application with the notification message ID."""
-        if not message_id or pending_key == message_id:
-            return pending_key
+    def bind_pending_message(
+        self, pending_key: str, message_id: str, ref_idx: str = ""
+    ) -> str:
+        """Save QQ's reference index even if the send response has no message ID."""
         item = self.data["pending"].pop(pending_key, None)
         if not isinstance(item, dict):
             return pending_key
-        self.data["pending"][message_id] = item
+        if ref_idx:
+            item["ref_idx"] = ref_idx
+        key = message_id or pending_key
+        self.data["pending"][key] = item
         self.save()
-        return message_id
+        return key
+
+    def find_pending_by_quote(
+        self, references: set[str], platform_id: str, group_openid: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        self.prune()
+        matched = None
+        for key, item in self.data["pending"].items():
+            if not isinstance(item, dict):
+                continue
+            if (
+                item.get("platform_id") != platform_id
+                or item.get("group_openid") != group_openid
+            ):
+                continue
+            if key not in references and item.get("ref_idx") not in references:
+                continue
+            if matched is not None:
+                return None  # Conflicting quote identifiers must never pick a request.
+            matched = str(key), dict(item)
+        return matched
 
     def get_pending(self, notification_message_id: str) -> dict[str, Any] | None:
         item = self.data["pending"].get(notification_message_id)

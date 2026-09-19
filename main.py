@@ -188,7 +188,6 @@ def intent_value(value: Any) -> int:
 def format_request(item: dict[str, Any], *, markdown: bool = False) -> str:
     lines = [
         "新的入群申请",
-        f"申请 ID：{item.get('join_request_id') or '未提供'}",
         f"昵称：{item.get('username') or '未提供'}",
         f"申请时间：{item.get('apply_at') or '未提供'}",
         "来源：" + format_apply_source(item.get("apply_source")),
@@ -367,52 +366,42 @@ def review_action_text(event: AstrMessageEvent) -> str:
     ).strip()
 
 
-def review_quote(event: AstrMessageEvent) -> tuple[str, str] | None:
-    """Read the original message ID and quoted text, never the new reply text."""
-    reply = next((p for p in event.get_messages() if isinstance(p, Reply)), None)
-    message_id = str(reply.id or "") if reply is not None else ""
-    text = ""
-    if reply is not None:
-        text = (
-            reply.message_str
-            or reply.text
-            or "\n".join(p.text for p in reply.chain or [] if isinstance(p, Plain))
-        )
+def qq_field(value: Any, name: str) -> Any:
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
 
-    def field(value: Any, name: str) -> Any:
-        return (
-            value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        )
+
+def review_quote(event: AstrMessageEvent) -> set[str] | None:
+    """Read only the immediate quote's IDs, never the current message's msg_idx."""
+    reply = next((p for p in event.get_messages() if isinstance(p, Reply)), None)
+    references = {str(reply.id)} if reply is not None and reply.id else set()
 
     # Older adapters may preserve QQ's quote fields without building a Reply.
     raw = event.message_obj.raw_message
     quoted = reply is not None
-    for source in (raw, field(raw, "raw_data")):
-        reference = field(source, "message_reference")
-        reference_id = field(reference, "message_id")
+    for source in (raw, qq_field(raw, "raw_data")):
+        reference_id = qq_field(qq_field(source, "message_reference"), "message_id")
         if reference_id:
             quoted = True
-            message_id = message_id or str(reference_id)
-        if str(field(source, "message_type")) == "103":
+            references.add(str(reference_id))
+        ext = qq_field(qq_field(source, "message_scene"), "ext")
+        if isinstance(ext, list):
+            for entry in ext:
+                if not isinstance(entry, str):
+                    continue
+                key, separator, value = entry.partition("=")
+                if separator and key.strip() == "ref_msg_idx":
+                    quoted = True
+                    if value.strip():
+                        references.add(value.strip())
+        if str(qq_field(source, "message_type")) == "103":
             quoted = True
-            elements = field(source, "msg_elements")
+            elements = qq_field(source, "msg_elements")
             if isinstance(elements, list) and elements:
-                message_id = message_id or str(
-                    field(elements[0], "id") or field(elements[0], "message_id") or ""
-                )
-                text = text or str(field(elements[0], "content") or "")
-    return (message_id, text) if quoted else None
-
-
-def quoted_request_id(text: str) -> str:
-    # QQ may return either rendered text or the escaped Markdown source.
-    text = re.sub(r"\\([\\`*_{}\[\]()#+.!|<>~-])", r"\1", text)
-    ids = {
-        match.group(1)
-        for line in text.splitlines()
-        if (match := re.fullmatch(r"申请 ID[：:][ \t]*(\S+)", line.strip()))
-    }
-    return ids.pop() if len(ids) == 1 else ""
+                for key in ("id", "message_id", "msg_idx"):
+                    value = qq_field(elements[0], key)
+                    if value:
+                        references.add(str(value))
+    return references if quoted else None
 
 
 @register(
@@ -798,10 +787,12 @@ class QQGroupAdminPlugin(Star):
                     )
                 result = await api.send_group_text(group_openid, fallback)
             message_id = self._response_id(result)
-            if message_id:
+            ref_idx = str(qq_field(qq_field(result, "ext_info"), "ref_idx") or "")
+            if message_id or ref_idx:
                 pending_key = self.storage.bind_pending_message(
                     pending_key,
                     message_id,
+                    ref_idx,
                 )
         except Exception:
             self.storage.remove_pending(pending_key)
@@ -983,35 +974,20 @@ class QQGroupAdminPlugin(Star):
         quote = review_quote(event)
         if quote is None:
             return
-        pending_key, quoted_text = quote
         try:
-            self.storage.prune()
-            pending = self.storage.get_pending(pending_key) if pending_key else None
-            if pending is None:
-                request_id = quoted_request_id(quoted_text)
-                matched = (
-                    self.storage.find_pending_by_join_request_id(
-                        request_id, event.get_group_id(), event.get_platform_id()
-                    )
-                    if request_id
-                    else None
-                )
-                if matched:
-                    pending_key, pending = matched
-            if not pending:
+            matched = self.storage.find_pending_by_quote(
+                quote, event.get_platform_id(), event.get_group_id()
+            )
+            if matched is None:
                 result = (
-                    "这条引用没有提供原消息 ID，也未匹配到有效的申请 ID，请使用申请卡片上的审批按钮。"
-                    if not pending_key
-                    else "未找到这条通知对应的待审批申请，可能已处理或过期，请使用有效申请卡片上的审批按钮。"
+                    "这条引用没有提供原消息 ID 或有效引用索引，请使用申请卡片上的审批按钮。"
+                    if not quote
+                    else "引用索引未唯一匹配到本群待审批申请，可能已处理或过期，请使用申请卡片上的审批按钮。"
                 )
-            elif (
-                pending.get("group_openid") != event.get_group_id()
-                or pending.get("platform_id") != event.get_platform_id()
-            ):
-                result = "这条申请不属于当前群或平台，不能审批。"
             elif not self._can_manage(event):
                 result = "你没有本群群管权限。"
             else:
+                pending_key, pending = matched
                 approve = action_match.group(1) in {"同意", "通过"}
                 reason = (action_match.group(2) or "").strip()
                 try:
