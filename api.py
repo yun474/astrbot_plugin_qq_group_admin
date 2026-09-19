@@ -102,7 +102,7 @@ class QQGroupManageAPI:
         )
 
     async def acknowledge_interaction(self, interaction_id: str, code: int = 0) -> Any:
-        """End the QQ callback button's loading state (0=accepted, 4=denied)."""
+        """ACK: 0=accepted, 1=failed, 2=busy, 3=duplicate, 4=denied, 5=admin-only."""
         return await self._request(
             "PUT",
             f"/interactions/{quote(interaction_id, safe='')}",

@@ -20,7 +20,7 @@
 
 <a id="features"></a>
 
-## ✨ 群里的小帮手
+## ✨ 群管功能
 
 | | 功能 |
 | --- | --- |
@@ -67,9 +67,10 @@
 
 | 按钮 | 权限 |
 | --- | --- |
-| 同意 / 拒绝（同一行） | QQ 原生群主、群管理员、AstrBot 管理员和当前群插件群管共用 |
+| 群管同意 / 群管拒绝（第一行） | QQ 原生群主、群管理员，由 QQ 的「仅管理者可操作」按钮权限控制 |
+| 授权同意 / 授权拒绝（第二行） | 发卡时的 AstrBot 管理员和本群插件群管，QQ 限制指定用户点击，插件再实时复核名单 |
 
-点击「拒绝」不填写理由。成功处理后旧按钮失效；处理中的重复点击不会重复提交。
+点击拒绝按钮不填写理由。成功处理后该申请的所有按钮失效；按钮、引用回复和 LLM 工具共享处理锁，处理中的重复审批不会重复提交。
 
 ### ② 引用通知回复
 
@@ -79,18 +80,6 @@
 
 2.6.0 已移除申请编号、编号审批指令和 `/群申请归零`；旧通知上的编号按钮不再生效。LLM 申请审批工具仍单独保留。
 
-<details>
-<summary>按钮权限与事件订阅</summary>
-
-- 两个按钮共用，后台按实际点击者校验权限；普通成员点击不会执行审批。
-- AstrBot 管理员与插件群管按当前名单校验，新增或撤销权限对已发送的共享按钮同样生效。
-- QQ 原生群主、群管理员通过[获取群成员信息接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)实时核验。该接口目前需内邀权限，限频 30 QPM；未开通、超时或查询失败时拒绝审批，可配置为插件群管，或引用通知回复。旧版双行回调按钮也会执行此校验。
-- WebSocket 自动补充相关 Intents；Webhook 需订阅 `GROUP_JOIN_REQUEST`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE`、`INTERACTION_CREATE`。
-- 按钮遵循 [QQ 官方回调协议](https://github.com/tencent-connect/bot-docs/blob/645787a45937e5d9c4f0f61afefdffde0f38696e/docs/develop/api-v2/server-inter/message/trans/msg-btn.md)，使用随机标识绑定申请，并校验平台、群和有效期。
-
-</details>
-
-<a id="permissions"></a>
 
 ## 🗝️ 权限与开关
 
@@ -102,7 +91,7 @@
 | 修改全局功能开关 | ✅ | — | — | — |
 | 查看群管名单与帮助 | ✅ | ✅ | ✅ | ✅ |
 
-插件群管按群保存，使用 QQ 官方成员 OpenID，不是公开 QQ 号。
+插件群管按群保存，使用 QQ 官方机器人中的成员 OpenID。
 
 ### LLM 唤醒人权限
 
@@ -141,5 +130,6 @@
 喜欢的话，给云云点一颗 ⭐ 吧！
 
 [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_qq_group_admin/issues) · [MIT License](LICENSE)
+#### 插件问题反馈qq群 947667614
 
 </div>

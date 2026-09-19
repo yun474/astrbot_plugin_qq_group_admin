@@ -167,7 +167,9 @@ class CoreTests(unittest.TestCase):
     def test_keyboard_is_attached_to_markdown_payload(self) -> None:
         api = QQGroupManageAPI(object())
         api._request = AsyncMock(return_value={"id": "message-1"})
-        keyboard = review_keyboard("a" * 32)
+        keyboard = review_keyboard(
+            {"a" * 32: {"action": "approve", "audience": "native"}}, []
+        )
 
         asyncio.run(api.send_group_markdown("group-1", "申请内容", keyboard=keyboard))
 

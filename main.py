@@ -225,12 +225,17 @@ def format_apply_source(value: Any) -> str:
     return APPLY_SOURCE_NAMES.get(source.lower(), "其他来源")
 
 
-def review_keyboard(token: str) -> dict[str, Any]:
-    """Share two callback buttons; authorize the actual clicker on the server."""
+def review_keyboard(
+    callbacks: dict[str, dict[str, str]], admin_ids: list[str]
+) -> dict[str, Any]:
+    """Restrict both rows in QQ; assigned admins are also rechecked on callback."""
 
-    def button(action: str, label: str) -> dict[str, Any]:
+    def button(token: str, action: str, audience: str) -> dict[str, Any]:
+        label = ("群管" if audience == "native" else "授权") + (
+            "同意" if action == "approve" else "拒绝"
+        )
         return {
-            "id": f"qqga-{action}-shared",
+            "id": f"qqga-{action}-{audience}",
             "render_data": {
                 "label": label,
                 "visited_label": label,
@@ -238,8 +243,10 @@ def review_keyboard(token: str) -> dict[str, Any]:
             },
             "action": {
                 "type": 1,
-                "permission": {"type": 2},
-                "data": f"qqga:{token}:{action}:shared",
+                "permission": {"type": 1}
+                if audience == "native"
+                else {"type": 0, "specify_user_ids": admin_ids},
+                "data": f"qqga:{token}:{action}:{audience}",
                 "unsupport_tips": "请更新 QQ 客户端，或引用申请通知回复 同意 / 拒绝",
             },
         }
@@ -247,10 +254,13 @@ def review_keyboard(token: str) -> dict[str, Any]:
     rows = [
         {
             "buttons": [
-                button("approve", "同意"),
-                button("decline", "拒绝"),
+                button(token, binding["action"], audience)
+                for token, binding in callbacks.items()
+                if binding["audience"] == audience
             ]
         }
+        for audience in ("native", "assigned")
+        if audience == "native" or admin_ids
     ]
     return {"content": {"rows": rows}}
 
@@ -376,7 +386,7 @@ class QQGroupAdminPlugin(Star):
         self._patch_task: asyncio.Task | None = None
         self._parser_state_class: Any = None
         self._owned_parser_methods: dict[str, Any] = {}
-        self._review_callbacks_inflight: set[str] = set()
+        self._reviews_inflight: set[tuple[str, str, str]] = set()
         self._callback_guard = ReviewCallbackGuard()
         self._install_parser_patch()
 
@@ -701,7 +711,13 @@ class QQGroupAdminPlugin(Star):
         stored = dict(item)
         stored["platform_id"] = platform_id
         stored["group_openid"] = group_openid
-        stored["callback_token"] = secrets.token_hex(16)
+        admin_ids = self._callback_admin_ids(platform_id, group_openid)
+        stored["review_callbacks"] = {
+            secrets.token_hex(16): {"action": action, "audience": audience}
+            for audience in ("native", "assigned")
+            if audience == "native" or admin_ids
+            for action in ("approve", "decline")
+        }
         pending_key = self.storage.reserve_pending(stored)
         content = format_request(item, markdown=True)
         review_enabled = self._feature_setting(
@@ -716,7 +732,7 @@ class QQGroupAdminPlugin(Star):
                 result = await api.send_group_markdown(
                     group_openid,
                     content,
-                    keyboard=review_keyboard(stored["callback_token"])
+                    keyboard=review_keyboard(stored["review_callbacks"], admin_ids)
                     if review_enabled
                     else None,
                 )
@@ -772,12 +788,10 @@ class QQGroupAdminPlugin(Star):
             return True
 
         async def acknowledge(code: int) -> None:
-            # Use QQ's admin-only response for every rejected callback.
-            response_code = 0 if code == 0 else 5
             try:
                 # ACK is independent of the potentially slower approval request.
                 await asyncio.wait_for(
-                    api.acknowledge_interaction(interaction_id, response_code), 3
+                    api.acknowledge_interaction(interaction_id, code), 3
                 )
             except Exception:
                 if self._callback_guard.should_log_error("ack"):
@@ -806,31 +820,47 @@ class QQGroupAdminPlugin(Star):
             await acknowledge(4)
             return True
         assigned_admin = sender in self._callback_admin_ids(platform_id, group)
-        denial = self._callback_guard.check_click(
-            platform_id, group, sender, assigned_admin=assigned_admin
-        )
-        if denial is not None:
-            await acknowledge(denial)
-            return True
         matched = self.storage.find_pending_by_token(token)
         if matched is None:
             await acknowledge(3)  # Completed, expired or from a removed notification.
             return True
-        pending_key, pending = matched
+        _, pending = matched
         if (
             pending.get("platform_id") != platform_id
             or pending.get("group_openid") != group
         ):
             await acknowledge(4)
             return True
-        if token in self._review_callbacks_inflight:
+        callbacks = pending.get("review_callbacks")
+        native_button = False
+        if callbacks is not None:
+            # Bind BOTH operation and audience to an independently generated token.
+            # A legacy token or an edited assigned button cannot become native.
+            if callbacks.get(token) != {"action": action, "audience": audience}:
+                await acknowledge(4)
+                return True
+            native_button = audience == "native"
+            if not native_button and not assigned_admin:
+                await acknowledge(5)
+                return True
+        denial = self._callback_guard.check_click(
+            platform_id,
+            group,
+            sender,
+            assigned_admin=assigned_admin or native_button,
+        )
+        if denial is not None:
+            await acknowledge(denial)
+            return True
+        request_key = (platform_id, group, str(pending["join_request_id"]))
+        if request_key in self._reviews_inflight:
             await acknowledge(2)
             return True
-        self._review_callbacks_inflight.add(token)
+        self._reviews_inflight.add(request_key)
         try:
-            if not assigned_admin:
-                # Interactions carry no native role. Never trust the button audience
-                # or a role cached from an earlier message as authorization.
+            if not assigned_admin and not native_button:
+                # Legacy notifications retain live role verification. New native
+                # buttons rely on QQ enforcing permission.type=1 before dispatch.
                 if not self._callback_guard.start_lookup():
                     await acknowledge(2)
                     return True
@@ -844,7 +874,7 @@ class QQGroupAdminPlugin(Star):
                             "[%s] 无法验证按钮点击者身份，请检查获取群成员信息接口权限",
                             PLUGIN_NAME,
                         )
-                    await acknowledge(4)
+                    await acknowledge(1)
                     return True
                 finally:
                     self._callback_guard.finish_lookup()
@@ -872,7 +902,7 @@ class QQGroupAdminPlugin(Star):
                 logger.exception("[%s] 按钮审批入群申请失败", PLUGIN_NAME)
                 result = "入群申请审批失败，请查看机器人日志并核实申请状态。"
             else:
-                self.storage.remove_pending(pending_key)
+                self.storage.remove_reviewed_request(*request_key)
                 result = (
                     "已同意入群申请。" if action == "approve" else "已拒绝入群申请。"
                 )
@@ -888,7 +918,7 @@ class QQGroupAdminPlugin(Star):
                 # The approval may already have succeeded; never repeat it for a send failure.
                 logger.exception("[%s] 发送按钮审批结果失败", PLUGIN_NAME)
         finally:
-            self._review_callbacks_inflight.discard(token)
+            self._reviews_inflight.discard(request_key)
         return True
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
@@ -1370,13 +1400,24 @@ class QQGroupAdminPlugin(Star):
         approve: bool,
         reason: str,
     ) -> Any:
-        return await QQGroupManageAPI(self._platform(event).client).review_join_request(
-            group_openid,
-            member_openid,
-            join_request_id,
-            approve=approve,
-            reject_reason=reason,
-        )
+        request_key = (event.get_platform_id(), group_openid, join_request_id)
+        if request_key in self._reviews_inflight:
+            raise ValueError("该入群申请正在处理中，请勿重复审批。")
+        self._reviews_inflight.add(request_key)
+        try:
+            result = await QQGroupManageAPI(
+                self._platform(event).client
+            ).review_join_request(
+                group_openid,
+                member_openid,
+                join_request_id,
+                approve=approve,
+                reject_reason=reason,
+            )
+            self.storage.remove_reviewed_request(*request_key)
+            return result
+        finally:
+            self._reviews_inflight.discard(request_key)
 
     def _migrate_config_layout(self) -> None:
         """Move the old flat plugin config into the grouped dashboard layout once."""

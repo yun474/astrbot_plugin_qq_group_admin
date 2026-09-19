@@ -139,9 +139,27 @@ class PluginStorage:
         for message_id, item in self.data["pending"].items():
             if not isinstance(item, dict):
                 continue
-            if item.get("callback_token") == token:
+            if item.get("callback_token") == token or token in item.get(
+                "review_callbacks", {}
+            ):
                 return str(message_id), dict(item)
         return None
+
+    def remove_reviewed_request(
+        self, platform_id: str, group_openid: str, join_request_id: str
+    ) -> None:
+        """Invalidate all notifications/buttons after any approval entry succeeds."""
+        keys = [
+            key
+            for key, item in self.data["pending"].items()
+            if item.get("platform_id") == platform_id
+            and item.get("group_openid") == group_openid
+            and str(item.get("join_request_id")) == join_request_id
+        ]
+        if keys:
+            for key in keys:
+                del self.data["pending"][key]
+            self.save()
 
     def remove_pending(self, notification_message_id: str) -> None:
         if self.data["pending"].pop(notification_message_id, None) is not None:
