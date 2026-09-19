@@ -31,7 +31,7 @@ LIFECYCLE_EVENTS = (
     "group_member_add",
     "group_member_remove",
 )
-ACTION_RE = re.compile(r"^(同意|通过|拒绝|驳回)(?:\s+(.+))?$", re.S)
+ACTION_RE = re.compile(r"^/?(同意|通过|拒绝|驳回)(?:\s+(.+))?$", re.S)
 APPLY_SOURCE_NAMES = {
     "self_apply": "自主申请",
     "search": "搜索群聊申请",
@@ -188,6 +188,7 @@ def intent_value(value: Any) -> int:
 def format_request(item: dict[str, Any], *, markdown: bool = False) -> str:
     lines = [
         "新的入群申请",
+        f"申请 ID：{item.get('join_request_id') or '未提供'}",
         f"昵称：{item.get('username') or '未提供'}",
         f"申请时间：{item.get('apply_at') or '未提供'}",
         "来源：" + format_apply_source(item.get("apply_source")),
@@ -364,6 +365,54 @@ def review_action_text(event: AstrMessageEvent) -> str:
         for part in event.get_messages()
         if isinstance(part, Plain)
     ).strip()
+
+
+def review_quote(event: AstrMessageEvent) -> tuple[str, str] | None:
+    """Read the original message ID and quoted text, never the new reply text."""
+    reply = next((p for p in event.get_messages() if isinstance(p, Reply)), None)
+    message_id = str(reply.id or "") if reply is not None else ""
+    text = ""
+    if reply is not None:
+        text = (
+            reply.message_str
+            or reply.text
+            or "\n".join(p.text for p in reply.chain or [] if isinstance(p, Plain))
+        )
+
+    def field(value: Any, name: str) -> Any:
+        return (
+            value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+        )
+
+    # Older adapters may preserve QQ's quote fields without building a Reply.
+    raw = event.message_obj.raw_message
+    quoted = reply is not None
+    for source in (raw, field(raw, "raw_data")):
+        reference = field(source, "message_reference")
+        reference_id = field(reference, "message_id")
+        if reference_id:
+            quoted = True
+            message_id = message_id or str(reference_id)
+        if str(field(source, "message_type")) == "103":
+            quoted = True
+            elements = field(source, "msg_elements")
+            if isinstance(elements, list) and elements:
+                message_id = message_id or str(
+                    field(elements[0], "id") or field(elements[0], "message_id") or ""
+                )
+                text = text or str(field(elements[0], "content") or "")
+    return (message_id, text) if quoted else None
+
+
+def quoted_request_id(text: str) -> str:
+    # QQ may return either rendered text or the escaped Markdown source.
+    text = re.sub(r"\\([\\`*_{}\[\]()#+.!|<>~-])", r"\1", text)
+    ids = {
+        match.group(1)
+        for line in text.splitlines()
+        if (match := re.fullmatch(r"申请 ID[：:][ \t]*(\S+)", line.strip()))
+    }
+    return ids.pop() if len(ids) == 1 else ""
 
 
 @register(
@@ -931,48 +980,63 @@ class QQGroupAdminPlugin(Star):
         action_match = ACTION_RE.fullmatch(review_action_text(event))
         if not action_match:
             return
-        reply = next(
-            (part for part in event.get_messages() if isinstance(part, Reply)), None
-        )
-        if reply is None:
+        quote = review_quote(event)
+        if quote is None:
             return
-        # Never infer an application from quoted text: only our saved message ID is trusted.
-        self.storage.prune()
-        pending_key = str(reply.id or "")
-        pending = self.storage.get_pending(pending_key) if pending_key else None
-        if not pending:
-            return
-        event.stop_event()
-        if (
-            pending.get("group_openid") != event.get_group_id()
-            or pending.get("platform_id") != event.get_platform_id()
-        ):
-            yield event.plain_result("这条申请不属于当前群或平台，不能审批。")
-            return
-        if not self._can_manage(event):
-            yield event.plain_result("你没有本群群管权限。")
-            return
-        approve = action_match.group(1) in {"同意", "通过"}
-        reason = (action_match.group(2) or "").strip()
+        pending_key, quoted_text = quote
         try:
-            await self._review(
-                event,
-                str(pending["group_openid"]),
-                str(pending["member_openid"]),
-                str(pending["join_request_id"]),
-                approve,
-                reason,
-            )
-        except Exception as exc:
-            yield event.plain_result(f"审批失败：{exc}")
-            return
-        self.storage.remove_pending(pending_key)
-        result = (
-            "已同意入群申请。"
-            if approve
-            else f"已拒绝入群申请。{(' 理由：' + reason) if reason else ''}"
-        )
-        yield event.plain_result(result)
+            self.storage.prune()
+            pending = self.storage.get_pending(pending_key) if pending_key else None
+            if pending is None:
+                request_id = quoted_request_id(quoted_text)
+                matched = (
+                    self.storage.find_pending_by_join_request_id(
+                        request_id, event.get_group_id(), event.get_platform_id()
+                    )
+                    if request_id
+                    else None
+                )
+                if matched:
+                    pending_key, pending = matched
+            if not pending:
+                result = (
+                    "这条引用没有提供原消息 ID，也未匹配到有效的申请 ID，请使用申请卡片上的审批按钮。"
+                    if not pending_key
+                    else "未找到这条通知对应的待审批申请，可能已处理或过期，请使用有效申请卡片上的审批按钮。"
+                )
+            elif (
+                pending.get("group_openid") != event.get_group_id()
+                or pending.get("platform_id") != event.get_platform_id()
+            ):
+                result = "这条申请不属于当前群或平台，不能审批。"
+            elif not self._can_manage(event):
+                result = "你没有本群群管权限。"
+            else:
+                approve = action_match.group(1) in {"同意", "通过"}
+                reason = (action_match.group(2) or "").strip()
+                try:
+                    await self._review(
+                        event,
+                        str(pending["group_openid"]),
+                        str(pending["member_openid"]),
+                        str(pending["join_request_id"]),
+                        approve,
+                        reason,
+                    )
+                except Exception as exc:
+                    result = f"审批失败：{exc}"
+                else:
+                    self.storage.remove_pending(pending_key)
+                    result = (
+                        "已同意入群申请。"
+                        if approve
+                        else f"已拒绝入群申请。{(' 理由：' + reason) if reason else ''}"
+                    )
+            # Send before stopping: yielding a result after stop_event can either
+            # skip sending or replace the STOP result on older AstrBot versions.
+            await event.send(event.plain_result(result))
+        finally:
+            event.stop_event()
 
     @filter.command("禁言")
     async def mute_command(self, event: AstrMessageEvent) -> None:

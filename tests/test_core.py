@@ -142,7 +142,7 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(review_action_text(Event()), "同意")
 
-    def test_request_notice_hides_ids_and_translates_source(self) -> None:
+    def test_request_notice_shows_request_id_but_hides_member_id(self) -> None:
         text = format_request(
             {
                 "username": "测试用户",
@@ -160,7 +160,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("来源：自主申请", text)
         self.assertIn("验证消息：答案", text)
         self.assertNotIn("member-secret", text)
-        self.assertNotIn("request-secret", text)
+        self.assertIn("申请 ID：request-secret", text)
         self.assertNotIn("验证方式", text)
         self.assertEqual(format_apply_source("unknown-value"), "其他来源")
 

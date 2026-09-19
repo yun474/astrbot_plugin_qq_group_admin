@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot.api.message_components import Plain, Reply
 from astrbot_plugin_qq_group_admin.api import QQGroupManageAPI
@@ -22,10 +22,15 @@ from botpy.interaction import Interaction
 
 
 class Event:
-    def __init__(self, sender="member", role="member", astr_admin=False, reply=None):
+    def __init__(
+        self, sender="member", role="member", astr_admin=False, reply=None, text="同意"
+    ):
         self.sender, self.astr_admin, self.reply = sender, astr_admin, reply
         self.message_obj = NS(raw_message={"author": {"member_role": role}})
         self.unified_msg_origin = "p:GroupMessage:g"
+        self.text = text
+        self.sent = []
+        self.stopped = False
 
     def get_sender_id(self):
         return self.sender
@@ -46,10 +51,13 @@ class Event:
         return self.astr_admin
 
     def get_messages(self):
-        return ([self.reply] if self.reply else []) + [Plain(text="同意")]
+        return ([self.reply] if self.reply else []) + [Plain(text=self.text)]
 
     def stop_event(self):
-        pass
+        self.stopped = True
+
+    async def send(self, result):
+        self.sent.append(result)
 
     def plain_result(self, text):
         return text
@@ -545,23 +553,277 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             Reply(id="", message_str="#1 新的入群申请"),
             Reply(id="forged", message_str="新的入群申请"),
         ):
-            result = [
-                x
-                async for x in self.plugin.reply_review(
-                    Event(astr_admin=True, reply=reply)
-                )
-            ]
-            self.assertEqual(result, [])
-        denied = [
-            x async for x in self.plugin.reply_review(Event(reply=Reply(id="notice")))
-        ]
-        self.assertIn("没有本群群管权限", denied[0])
+            event = Event(astr_admin=True, reply=reply)
+            await self.plugin.reply_review(event)
+            self.assertIn("审批按钮", event.sent[0])
+            self.assertTrue(event.stopped)
+        event = Event(reply=Reply(id="notice"))
+        await self.plugin.reply_review(event)
+        self.assertIn("没有本群群管权限", event.sent[0])
         self.plugin._review.assert_not_awaited()
-        awaitable = self.plugin.reply_review(
-            Event(astr_admin=True, reply=Reply(id="notice"))
-        )
-        self.assertEqual([x async for x in awaitable], ["已同意入群申请。"])
+        event = Event(astr_admin=True, reply=Reply(id="notice"))
+        await self.plugin.reply_review(event)
+        self.assertEqual(event.sent, ["已同意入群申请。"])
         self.plugin._review.assert_awaited_once()
+
+    async def test_raw_qq_quote_fields_work_without_reply_component(self):
+        self.plugin._review = AsyncMock()
+        for raw in (
+            {"message_reference": {"message_id": "notice"}},
+            NS(message_reference=NS(message_id="notice")),
+            {"message_type": 103, "msg_elements": [{"id": "notice"}]},
+            NS(
+                raw_data={
+                    "message_type": 103,
+                    "msg_elements": [{"message_id": "notice"}],
+                }
+            ),
+            NS(message_type=103, msg_elements=[NS(id="notice")]),
+        ):
+            self.plugin.storage.put_pending("notice", self.pending)
+            event = Event(astr_admin=True, text="/拒绝 未完成验证")
+            event.message_obj.raw_message = raw
+            await self.plugin.reply_review(event)
+            self.plugin._review.assert_awaited_with(
+                event, "g", "applicant", "request", False, "未完成验证"
+            )
+            self.assertEqual(event.sent, ["已拒绝入群申请。 理由：未完成验证"])
+            self.assertTrue(event.stopped)
+
+    async def test_empty_reply_component_can_use_original_qq_reference_id(self):
+        event = Event(astr_admin=True, reply=Reply(id=""))
+        event.message_obj.raw_message = NS(
+            raw_data={
+                "message_type": 103,
+                "msg_elements": [{"id": "notice"}],
+            }
+        )
+        await self.plugin.reply_review(event)
+        self.assertEqual(event.sent, ["已同意入群申请。"])
+        self.api.review_join_request.assert_awaited_once()
+
+    async def test_quote_without_recognizable_id_never_guesses_application(self):
+        event = Event(astr_admin=True)
+        event.message_obj.raw_message = {
+            "message_type": 103,
+            "msg_elements": [{"content": "# 📨 入群申请 notice request applicant"}],
+        }
+        await self.plugin.reply_review(event)
+        self.assertIn("没有提供原消息 ID", event.sent[0])
+        self.assertTrue(event.stopped)
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_quoted_native_request_id_locates_pending_without_message_id(self):
+        request_id = "native-request_123.abc"
+        self.pending["join_request_id"] = request_id
+        self.plugin._review = AsyncMock()
+        for markdown in (False, True):
+            content = format_request(self.pending, markdown=markdown)
+            for quoted in (
+                Reply(id="", message_str=content),
+                Reply(id="unmatched-qq-id", text=content),
+                Reply(id="", chain=[Plain(content.replace("\n", "\r\n"))]),
+            ):
+                self.plugin.storage.put_pending("notice", self.pending)
+                event = Event(astr_admin=True, reply=quoted)
+                await self.plugin.reply_review(event)
+                self.plugin._review.assert_awaited_with(
+                    event, "g", "applicant", request_id, True, ""
+                )
+                self.assertEqual(event.sent, ["已同意入群申请。"])
+                self.assertTrue(event.stopped)
+        self.plugin.storage.put_pending("notice", self.pending)
+        event = Event(astr_admin=True)
+        event.message_obj.raw_message = NS(
+            raw_data={
+                "message_type": 103,
+                "msg_elements": [{"content": content}],
+            }
+        )
+        await self.plugin.reply_review(event)
+        self.assertEqual(event.sent, ["已同意入群申请。"])
+
+    async def test_request_id_lookup_cannot_cross_platform_or_group(self):
+        self.plugin.storage.remove_pending("notice")
+        for key, override in (
+            ("other-platform", {"platform_id": "other"}),
+            ("other-group", {"group_openid": "other"}),
+        ):
+            self.plugin.storage.put_pending(key, {**self.pending, **override})
+        event = Event(
+            astr_admin=True, reply=Reply(id="", message_str="申请 ID：request")
+        )
+        await self.plugin.reply_review(event)
+        self.api.review_join_request.assert_not_awaited()
+        self.assertTrue(event.stopped)
+        # Identical IDs in other scopes must not hide the correct scoped record.
+        self.plugin.storage.put_pending("notice", self.pending)
+        await self.plugin.reply_review(event)
+        self.api.review_join_request.assert_awaited_once_with(
+            "g", "applicant", "request", approve=True, reject_reason=""
+        )
+        self.assertIsNotNone(self.plugin.storage.get_pending("other-platform"))
+        self.assertIsNotNone(self.plugin.storage.get_pending("other-group"))
+
+    async def test_request_id_lookup_checks_permission_expiry_and_ambiguity(self):
+        for case in ("denied", "expired", "unknown", "ambiguous"):
+            self.plugin.storage.put_pending("notice", self.pending)
+            content = "申请 ID：request"
+            if case == "expired":
+                self.plugin.storage.data["pending"]["notice"]["stored_at"] = (
+                    datetime.now(timezone.utc) - timedelta(days=31)
+                ).isoformat()
+            elif case == "unknown":
+                content = "申请 ID：unknown"
+            elif case == "ambiguous":
+                content += "\n申请 ID：other"
+            event = Event(
+                astr_admin=case != "denied", reply=Reply(id="", message_str=content)
+            )
+            await self.plugin.reply_review(event)
+            self.assertTrue(event.stopped)
+            self.assertTrue(event.sent)
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_message_id_takes_precedence_over_text_request_id(self):
+        self.plugin.storage.put_pending(
+            "other-notice",
+            {
+                **self.pending,
+                "join_request_id": "other-request",
+                "member_openid": "other-member",
+            },
+        )
+        event = Event(
+            astr_admin=True,
+            reply=Reply(id="notice", message_str="申请 ID：other-request"),
+        )
+        await self.plugin.reply_review(event)
+        self.api.review_join_request.assert_awaited_once_with(
+            "g", "applicant", "request", approve=True, reject_reason=""
+        )
+        self.assertIsNotNone(self.plugin.storage.get_pending("other-notice"))
+
+    async def test_ordinary_messages_and_disabled_scopes_are_not_consumed(self):
+        for event, config in (
+            (Event(astr_admin=True), {}),
+            (Event(reply=Reply(id="notice"), text="这个申请是什么情况？"), {}),
+            (Event(reply=Reply(id="notice")), {"enable_join_reply_review": False}),
+            (Event(reply=Reply(id="notice")), {"enabled_group_umos": ["other"]}),
+        ):
+            self.plugin.config = config
+            await self.plugin.reply_review(event)
+            self.assertFalse(event.stopped)
+            self.assertEqual(event.sent, [])
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_reply_send_failure_still_stops_event_and_does_not_restore_request(
+        self,
+    ):
+        event = Event(astr_admin=True, reply=Reply(id="notice"))
+        event.send = AsyncMock(side_effect=RuntimeError("send failed"))
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await self.plugin.reply_review(event)
+        self.assertTrue(event.stopped)
+        self.assertIsNone(self.plugin.storage.get_pending("notice"))
+        self.api.review_join_request.assert_awaited_once()
+
+    async def test_real_astrbot_pipeline_never_calls_llm_for_quote_review(self):
+        from astrbot.core.pipeline.process_stage.stage import ProcessStage
+        from astrbot.core.pipeline.process_stage.method.star_request import (
+            StarRequestSubStage,
+        )
+        from astrbot.core.platform.astr_message_event import AstrMessageEvent
+        from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+        from astrbot.core.platform.message_type import MessageType
+        from astrbot.core.platform.platform_metadata import PlatformMetadata
+
+        stage = ProcessStage()
+        stage.ctx = NS(astrbot_config={"provider_settings": {"enable": True}})
+        stage.star_request_sub_stage = StarRequestSubStage()
+        stage.agent_sub_stage = NS(
+            process=Mock(side_effect=AssertionError("LLM must not run"))
+        )
+        handler = NS(
+            handler_full_name="reply_test.reply_review",
+            handler_module_path="reply_test",
+            handler_name="reply_review",
+            handler=self.plugin.reply_review,
+        )
+        for platform in ("qq_official", "qq_official_webhook"):
+            for case in (
+                "success",
+                "request_id",
+                "missing_id",
+                "unknown_id",
+                "expired",
+                "denied",
+                "cross_group",
+                "api_error",
+            ):
+                with self.subTest(platform=platform, case=case):
+                    self.plugin.storage.put_pending("notice", self.pending)
+                    self.api.review_join_request.reset_mock(side_effect=True)
+                    reply_id = {
+                        "missing_id": "",
+                        "request_id": "",
+                        "unknown_id": "unknown",
+                    }.get(case, "notice")
+                    message = AstrBotMessage()
+                    message.type = MessageType.GROUP_MESSAGE
+                    message.self_id, message.group_id, message.message_id = (
+                        "bot",
+                        "g",
+                        "incoming",
+                    )
+                    message.sender = MessageMember("sender", "tester")
+                    message.message = [Reply(id=reply_id), Plain(text="同意")]
+                    if case == "request_id":
+                        message.message[0].message_str = format_request(
+                            self.pending, markdown=True
+                        )
+                    message.raw_message = {"author": {"member_role": "member"}}
+                    event = AstrMessageEvent(
+                        "同意", message, PlatformMetadata(platform, "test", "p"), "g"
+                    )
+                    event.role = "member" if case == "denied" else "admin"
+                    event.is_at_or_wake_command = True
+                    event.set_extra("activated_handlers", [handler])
+                    if case == "expired":
+                        self.plugin.storage.data["pending"]["notice"]["stored_at"] = (
+                            datetime.now(timezone.utc) - timedelta(days=31)
+                        ).isoformat()
+                    elif case == "cross_group":
+                        self.plugin.storage.data["pending"]["notice"][
+                            "group_openid"
+                        ] = "other"
+                    elif case == "api_error":
+                        self.api.review_join_request.side_effect = RuntimeError(
+                            "API failure"
+                        )
+
+                    async def send(result):
+                        self.assertFalse(
+                            event.is_stopped(), "Reply must be sent before STOP"
+                        )
+                        self.assertTrue(result.chain)
+
+                    event.send = AsyncMock(side_effect=send)
+                    with patch.dict(
+                        "astrbot.core.pipeline.process_stage.method.star_request.star_map",
+                        {
+                            "reply_test": NS(name="reply-test"),
+                        },
+                    ):
+                        async for _ in stage.process(event):
+                            pass
+                    event.send.assert_awaited_once()
+                    self.assertTrue(event.is_stopped())
+                    if case in {"success", "request_id", "api_error"}:
+                        self.api.review_join_request.assert_awaited_once()
+                    else:
+                        self.api.review_join_request.assert_not_awaited()
+        stage.agent_sub_stage.process.assert_not_called()
 
     async def test_ack_api_uses_new_domain_and_encoded_interaction_id(self):
         api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
@@ -738,13 +1000,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 "p", self.button_interaction(buttons[3])
             )
             self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 2)
-            reply = [
-                x
-                async for x in self.plugin.reply_review(
-                    Event(astr_admin=True, reply=Reply(id="notice"))
-                )
-            ]
-            self.assertIn("正在处理中", reply[0])
+            event = Event(astr_admin=True, reply=Reply(id="notice"))
+            await self.plugin.reply_review(event)
+            self.assertIn("正在处理中", event.sent[0])
             result = await self.plugin.review_join_request_tool(
                 Event(astr_admin=True), "applicant", "request", "decline"
             )
@@ -771,12 +1029,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
 
         async def reply():
-            return [
-                x
-                async for x in self.plugin.reply_review(
-                    Event(astr_admin=True, reply=Reply(id="notice"))
-                )
-            ]
+            await self.plugin.reply_review(
+                Event(astr_admin=True, reply=Reply(id="notice"))
+            )
 
         self.api.review_join_request.side_effect = slow_review
         first = asyncio.create_task(reply())

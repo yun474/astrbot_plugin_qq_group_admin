@@ -123,6 +123,7 @@ class PluginStorage:
         self,
         join_request_id: str,
         group_openid: str = "",
+        platform_id: str = "",
     ) -> tuple[str, dict[str, Any]] | None:
         for message_id, item in self.data["pending"].items():
             if not isinstance(item, dict):
@@ -130,6 +131,8 @@ class PluginStorage:
             if str(item.get("join_request_id") or "") != join_request_id:
                 continue
             if group_openid and str(item.get("group_openid") or "") != group_openid:
+                continue
+            if platform_id and str(item.get("platform_id") or "") != platform_id:
                 continue
             return str(message_id), dict(item)
         return None
