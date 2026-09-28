@@ -65,6 +65,12 @@ class Event:
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        session_patcher = patch(
+            "astrbot_plugin_qq_group_admin.main.SessionPluginManager.is_plugin_enabled_for_session",
+            new=AsyncMock(return_value=True),
+        )
+        self.session_enabled = session_patcher.start()
+        self.addCleanup(session_patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.plugin = object.__new__(QQGroupAdminPlugin)
@@ -140,6 +146,107 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         }
         payload.update(extra)
         return Interaction(None, "outer-event", payload)
+
+    async def test_sdk_entries_respect_framework_session_settings(self):
+        for case in ("plugin_set", "session_disabled", "lookup_failure"):
+            with self.subTest(case=case):
+                self.plugin.context.get_config = Mock(
+                    return_value={
+                        "plugin_set": [] if case == "plugin_set" else ["*"],
+                        "admins_id": ["astr-admin"],
+                    }
+                )
+                self.session_enabled.side_effect = (
+                    RuntimeError("database unavailable")
+                    if case == "lookup_failure"
+                    else None
+                )
+                self.session_enabled.return_value = False
+                await self.plugin._handle_join_request_event("p", self.pending)
+                await self.plugin._handle_member_event("p", "member_join", self.pending)
+                await self.plugin._handle_member_event(
+                    "p", "member_leave", self.pending
+                )
+                await self.plugin._handle_review_interaction("p", self.interaction())
+                self.api.review_join_request.assert_not_awaited()
+                self.api.send_group_text.assert_not_awaited()
+                self.api.acknowledge_interaction.assert_awaited_with(
+                    "interaction-id", 4
+                )
+                self.assertIsNotNone(self.plugin.storage.get_pending("notice"))
+
+    async def test_sdk_session_enablement_is_not_cached(self):
+        self.plugin.context.get_config = Mock(
+            return_value={
+                "plugin_set": ["astrbot_plugin_qq_group_admin"],
+                "admins_id": ["astr-admin"],
+            }
+        )
+        self.session_enabled.return_value = False
+        await self.plugin._handle_review_interaction("p", self.interaction())
+        self.api.review_join_request.assert_not_awaited()
+        self.session_enabled.return_value = True
+        await self.plugin._handle_review_interaction("p", self.interaction())
+        self.api.review_join_request.assert_awaited_once()
+        self.session_enabled.assert_awaited_with(
+            "p:GroupMessage:g", "astrbot_plugin_qq_group_admin"
+        )
+
+    async def test_unload_restores_parsers_without_overwriting_other_plugins(self):
+        original, later = Mock(), Mock()
+        connection = self.client._connection
+        connection.parser["group_join_request"] = original
+        await self.plugin._patch_platforms_once()
+        connection.parser["group_member_add"] = later
+        await self.plugin.terminate()
+        self.assertIs(connection.parser["group_join_request"], original)
+        self.assertIs(connection.parser["group_member_add"], later)
+        self.assertNotIn("group_member_remove", connection.parser)
+
+    async def test_client_replacement_restores_old_connection_parsers(self):
+        original = Mock()
+        old_connection = self.client._connection
+        old_connection.parser["group_join_request"] = original
+        await self.plugin._patch_platforms_once()
+        self.platform.client = NS(_connection=NS(parser={}), intents=0)
+        await self.plugin._patch_platforms_once()
+        self.assertIs(old_connection.parser["group_join_request"], original)
+        self.assertNotIn("group_member_add", old_connection.parser)
+        self.assertIn("group_join_request", self.platform.client._connection.parser)
+        await self.plugin.terminate()
+        self.assertEqual(self.platform.client._connection.parser, {})
+
+    async def test_quote_review_accepts_session_wake_prefixes(self):
+        self.plugin.context.get_config = Mock(
+            return_value={"wake_prefix": ["!", "云云 "]}
+        )
+        for text, approve, reason in (
+            ("!同意", True, ""),
+            ("云云 拒绝 未验证", False, "未验证"),
+            ("同意", True, ""),
+            ("/拒绝 理由", False, "理由"),
+        ):
+            with self.subTest(text=text):
+                self.plugin.storage.put_pending("notice", self.pending)
+                self.api.review_join_request.reset_mock()
+                event = Event(astr_admin=True, reply=Reply(id="notice"), text=text)
+                await self.plugin.reply_review(event)
+                self.api.review_join_request.assert_awaited_once_with(
+                    "g", "applicant", "request", approve=approve, reject_reason=reason
+                )
+                self.assertTrue(event.stopped)
+        self.plugin.context.get_config.assert_called_with("p:GroupMessage:g")
+
+    async def test_quote_custom_prefix_keeps_permission_and_quote_checks(self):
+        self.plugin.context.get_config = Mock(return_value={"wake_prefix": ["!"]})
+        for event in (
+            Event(astr_admin=True, reply=Reply(id="notice"), text="?同意"),
+            Event(astr_admin=True, text="!同意"),
+            Event(reply=Reply(id="notice"), text="!同意"),
+        ):
+            await self.plugin.reply_review(event)
+        self.api.review_join_request.assert_not_awaited()
+        self.assertIn("没有本群群管权限", event.sent[0])
 
     async def test_shared_callback_approves_once_and_survives_storage_reload(self):
         self.plugin.storage = PluginStorage(self.plugin.storage.path)

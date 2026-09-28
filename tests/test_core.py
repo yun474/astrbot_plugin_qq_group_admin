@@ -36,6 +36,16 @@ async def _collect_async_generator(generator):
 
 
 class CoreTests(unittest.TestCase):
+    def setUp(self):
+        # Core fixtures have no framework session database. Its authorization
+        # integration is covered separately in test_interactions.
+        async def enabled(plugin, umo):
+            return plugin._umo_enabled(umo)
+
+        patcher = patch.object(QQGroupAdminPlugin, "_sdk_group_enabled", enabled)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_group_umo_whitelist_empty_means_all_groups(self) -> None:
         plugin = object.__new__(QQGroupAdminPlugin)
         plugin.config = {"enabled_group_umos": []}
@@ -535,8 +545,8 @@ class CoreTests(unittest.TestCase):
         text = format_group_admin_help("3分")
         self.assertIn("# 🛡️ QQ 群管帮助", text)
         self.assertIn("默认 **3分**", text)
-        self.assertIn("`/解禁 @用户`", text)
-        self.assertIn("`/禁言状态`", text)
+        self.assertIn("`解禁 @用户`", text)
+        self.assertIn("`禁言状态`", text)
 
     def test_format_mute_status_contains_rules_and_member(self) -> None:
         text = format_mute_status(
@@ -734,7 +744,8 @@ class CoreTests(unittest.TestCase):
 
         self.assertIn("当前开关模式：**分群**", markdown)
         self.assertIn("禁言指令：[已开启]", markdown)
-        self.assertIn("command=%2F%E7%BE%A4%E7%AE%A1%E5%8A%9F%E8%83%BD", markdown)
+        self.assertIn("command=%E7%BE%A4%E7%AE%A1%E5%8A%9F%E8%83%BD", markdown)
+        self.assertNotIn("command=%2F", markdown)
         self.assertIn("&enter=false&reply=false", markdown)
         self.assertNotIn("/群管功能 禁言指令 关闭", markdown)
 

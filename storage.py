@@ -4,6 +4,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from astrbot.api import logger
 
 
 class PluginStorage:
@@ -20,18 +23,58 @@ class PluginStorage:
     def load(self) -> None:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                self.data.update(raw)
+            self._validate(raw)
         except FileNotFoundError:
-            pass
-        except (OSError, json.JSONDecodeError):
-            # Keep the plugin usable if a manually edited data file is malformed.
-            pass
-        self.data.setdefault("group_admins", {})
-        self.data.setdefault("group_feature_overrides", {})
-        self.data.setdefault("pending", {})
+            return
+        except (ValueError, UnicodeError) as exc:
+            backup = self.path.with_name(f"{self.path.stem}.corrupt-{uuid4().hex}.json")
+            # Both paths stay in the same data directory. If preserving the file
+            # fails, abort loading rather than overwrite the only recovery copy.
+            self.path.replace(backup)
+            logger.error("群管存储格式损坏，原文件已保留至 %s：%s", backup, exc)
+            return
+        except OSError as exc:
+            raise OSError(f"无法读取群管存储 {self.path}，原文件未修改") from exc
+        self.data.update(raw)
         self.data.pop("pending_counters", None)
         self.prune(save=False)
+
+    @staticmethod
+    def _validate(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            raise ValueError("存储根节点必须是对象")
+        for name in ("group_admins", "group_feature_overrides", "pending"):
+            if not isinstance(raw.get(name, {}), dict):
+                raise ValueError(f"{name} 必须是对象")
+        for admins in raw.get("group_admins", {}).values():
+            if not isinstance(admins, list) or any(
+                not isinstance(member, str) for member in admins
+            ):
+                raise ValueError("群管名单必须是 OpenID 字符串列表")
+        for overrides in raw.get("group_feature_overrides", {}).values():
+            if not isinstance(overrides, dict) or any(
+                not isinstance(value, bool) for value in overrides.values()
+            ):
+                raise ValueError("分群开关必须是布尔值对象")
+        for item in raw.get("pending", {}).values():
+            if not isinstance(item, dict):
+                raise ValueError("待审记录必须是对象")
+            for key in (
+                "platform_id",
+                "group_openid",
+                "member_openid",
+                "join_request_id",
+                "stored_at",
+                "ref_idx",
+                "callback_token",
+            ):
+                if key in item and not isinstance(item[key], str):
+                    raise ValueError(f"待审记录 {key} 必须是字符串")
+            callbacks = item.get("review_callbacks", {})
+            if not isinstance(callbacks, dict) or any(
+                not isinstance(binding, dict) for binding in callbacks.values()
+            ):
+                raise ValueError("审批按钮映射必须是对象")
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

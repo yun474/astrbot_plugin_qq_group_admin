@@ -11,13 +11,13 @@
           "type": "string"
         },
         "default": [],
-        "hint": "留空表示所有 QQ 群启用；在目标群发送 /sid，复制 UMO（形如 平台ID:GroupMessage:群会话ID）并逐项添加。白名单优先级最高。"
+        "hint": "留空表示所有 QQ 群启用；在目标群 @机器人发送 sid（或使用 AstrBot 配置的唤醒词），复制 UMO（形如 平台ID:GroupMessage:群会话ID）并逐项添加。白名单优先级最高。"
       },
       "enable_per_group_feature_settings": {
         "description": "开启分群功能管理",
         "type": "bool",
         "default": false,
-        "hint": "关闭时所有群统一使用本面板中的功能开关，AstrBot 管理员也可通过 /群管功能 修改并写回配置文件；开启后可分别修改当前群，未单独设置的功能继承本面板值。"
+        "hint": "关闭时所有群统一使用本面板中的功能开关，AstrBot 管理员也可通过 群管功能 修改并写回配置文件；开启后可分别修改当前群，未单独设置的功能继承本面板值。"
       }
     }
   },
@@ -30,50 +30,50 @@
         "description": "群主可增删插件群管",
         "type": "bool",
         "default": false,
-        "hint": "关闭时 QQ 群主不能使用 /添加群管 和 /删除群管，除非他同时是 AstrBot 管理员。"
+        "hint": "关闭时 QQ 群主不能使用 添加群管 和 删除群管，除非他同时是 AstrBot 管理员。"
       },
       "allow_group_admin_manage_plugin_admins": {
         "description": "群管理员可增删插件群管",
         "type": "bool",
         "default": false,
-        "hint": "关闭时 QQ 原生群管理员不能使用 /添加群管 和 /删除群管，除非他同时是 AstrBot 管理员。"
+        "hint": "关闭时 QQ 原生群管理员不能使用 添加群管 和 删除群管，除非他同时是 AstrBot 管理员。"
       }
     }
   },
   "command_settings": {
     "description": "③ 群内指令",
     "type": "object",
-    "hint": "这些是人工在群里发送的管理指令。分群模式开启后，它们也可以由各群的 /群管功能 单独覆盖。",
+    "hint": "这些是人工在群里发送的管理指令。分群模式开启后，它们也可以由各群的 群管功能 单独覆盖。",
     "items": {
       "enable_mute_command": {
         "description": "启用禁言与解禁指令",
         "type": "bool",
         "default": true,
-        "hint": "控制 /禁言 @用户 [时间] 和 /解禁 @用户。"
+        "hint": "控制 禁言 @用户 [时间] 和 解禁 @用户。"
       },
       "enable_mute_status_command": {
         "description": "启用禁言状态指令",
         "type": "bool",
         "default": true,
-        "hint": "控制 /禁言状态；展示全员禁言规则和当前被禁言成员。"
+        "hint": "控制 禁言状态；展示全员禁言规则和当前被禁言成员。"
       },
       "enable_group_admin_commands": {
         "description": "启用群管基础指令",
         "type": "bool",
         "default": true,
-        "hint": "控制 /添加群管、/删除群管、/群管列表、/群管帮助；不会关闭 /群管功能，避免分群模式下把控制入口一起锁死。"
+        "hint": "控制 添加群管、删除群管、群管列表、群管帮助；不会关闭 群管功能，避免分群模式下把控制入口一起锁死。"
       },
       "silent_mute_success_notice": {
         "description": "关闭禁言和解禁的固定成功提示",
         "type": "bool",
         "default": false,
-        "hint": "开启后不直接发送“已禁言/已解禁”，错误仍会提示。/群管功能 中会以更直观的“禁言成功提示”显示相反状态。LLM 自然回复不受影响。"
+        "hint": "开启后不直接发送“已禁言/已解禁”，错误仍会提示。群管功能 中会以更直观的“禁言成功提示”显示相反状态。LLM 自然回复不受影响。"
       },
       "default_mute_duration": {
         "description": "默认禁言时长",
         "type": "string",
         "default": "1分",
-        "hint": "执行 /禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
+        "hint": "执行 禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
       }
     }
   },
@@ -91,7 +91,7 @@
         "description": "启用群内申请审批",
         "type": "bool",
         "default": true,
-        "hint": "允许群管点击回调按钮直接审批；引用通知回复同意或拒绝也可审批（需要 QQ 提供原通知消息 ID）。"
+        "hint": "允许群管点击回调按钮直接审批；引用通知回复同意或拒绝也可审批（需要 QQ 提供原通知消息 ID 或引用索引），支持当前会话配置的 AstrBot 唤醒词。"
       },
       "join_request_page_size": {
         "description": "申请列表工具默认拉取条数（1-100）",

@@ -12,6 +12,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.star.session_plugin_manager import SessionPluginManager
 
 from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
@@ -135,7 +136,7 @@ def format_feature_status(
             status = "已开启" if enabled else "已关闭"
             next_action = "关闭" if enabled else "开启"
             command = quote(
-                f"/群管功能 {feature.name} {next_action}",
+                f"群管功能 {feature.name} {next_action}",
                 safe="",
             )
             status = (
@@ -316,22 +317,23 @@ def format_mute_status(result: dict[str, Any]) -> str:
 def format_group_admin_help(default_duration: str) -> str:
     return (
         "# 🛡️ QQ 群管帮助\n\n"
+        "@机器人后直接发送下列指令，无需添加 `/`；也可使用 AstrBot 中配置的唤醒词。\n\n"
         "## 成员管理\n\n"
-        "> `/禁言 @用户 [时间]`  \n"
+        "> `禁言 @用户 [时间]`  \n"
         f"> 禁言成员；不填时间默认 **{default_duration}**\n\n"
-        "> `/解禁 @用户`  \n"
+        "> `解禁 @用户`  \n"
         "> 解除成员禁言\n\n"
-        "> `/禁言状态`  \n"
+        "> `禁言状态`  \n"
         "> 查看全员禁言规则及被禁言成员\n\n"
         "## 群管管理\n\n"
-        "> `/添加群管 @用户`  \n"
+        "> `添加群管 @用户`  \n"
         "> 添加本群插件群管；默认仅 AstrBot 管理员可用\n\n"
-        "> `/删除群管 @用户`  \n"
+        "> `删除群管 @用户`  \n"
         "> 删除本群插件群管；可在配置中授权 QQ 群主或群管理员\n\n"
-        "> `/群管列表`  \n"
+        "> `群管列表`  \n"
         "> 查看本群群管\n\n"
-        "> `/群管功能`  \n"
-        "> 查看功能开关；分群模式下点击蓝色状态可填入切换指令\n\n"
+        "> `群管功能`  \n"
+        "> 查看功能开关；点击蓝色状态填入切换指令，发送后生效\n\n"
         "## 时间格式\n\n"
         "支持 `30秒`、`10分`、`2小时`、`1天2小时`  \n"
         "纯数字按分钟处理，例如 `30` 表示 **30分钟**\n\n"
@@ -409,7 +411,7 @@ def review_quote(event: AstrMessageEvent) -> set[str] | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.6.1",
+    "2.6.2",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -570,7 +572,7 @@ class QQGroupAdminPlugin(Star):
                     "owned_handlers": {
                         name: getattr(client, name) for name in old_handlers
                     },
-                    "connections": set(),
+                    "connections": {},
                 }
             patch_state = self._patched[platform_id]
             if meta.name == "qq_official":
@@ -601,10 +603,17 @@ class QQGroupAdminPlugin(Star):
                     data["_event_id"] = str(payload.get("id") or "")
                     c.ws_dispatch("group_member_remove", data)
 
-                connection.parser["group_join_request"] = join_request_parser
-                connection.parser["group_member_add"] = member_add_parser
-                connection.parser["group_member_remove"] = member_remove_parser
-                patch_state["connections"].add(id(connection))
+                parsers = {
+                    "group_join_request": join_request_parser,
+                    "group_member_add": member_add_parser,
+                    "group_member_remove": member_remove_parser,
+                }
+                patch_state["connections"][id(connection)] = (
+                    connection,
+                    {name: connection.parser.get(name) for name in parsers},
+                    parsers,
+                )
+                connection.parser.update(parsers)
                 logger.info("[%s] 已接入 QQ 入群申请与成员进退群事件", PLUGIN_NAME)
 
     async def _ensure_group_member_intent(self, platform: Any, client: Any) -> None:
@@ -674,7 +683,7 @@ class QQGroupAdminPlugin(Star):
             logger.warning("[%s] 成员事件缺少 group_openid: %r", PLUGIN_NAME, item)
             return
         group_umo = self._group_umo(platform_id, group_openid)
-        if not self._umo_enabled(group_umo):
+        if not await self._sdk_group_enabled(group_umo):
             return
         if not self._feature_setting(enabled_key, group_umo):
             return
@@ -740,7 +749,7 @@ class QQGroupAdminPlugin(Star):
             logger.warning("[%s] 入群申请缺少 group_openid: %r", PLUGIN_NAME, item)
             return
         group_umo = self._group_umo(platform_id, group_openid)
-        if not self._umo_enabled(group_umo):
+        if not await self._sdk_group_enabled(group_umo):
             return
         if not self._feature_setting("enable_join_notice", group_umo):
             return
@@ -855,7 +864,7 @@ class QQGroupAdminPlugin(Star):
             await acknowledge(4)
             return True
         umo = self._group_umo(platform_id, group)
-        if not self._umo_enabled(umo) or not self._feature_setting(
+        if not await self._sdk_group_enabled(umo) or not self._feature_setting(
             "enable_join_reply_review", umo
         ):
             await acknowledge(4)
@@ -969,11 +978,20 @@ class QQGroupAdminPlugin(Star):
             "enable_join_reply_review",
         ):
             return
-        action_match = ACTION_RE.fullmatch(review_action_text(event))
-        if not action_match:
-            return
+        action_text = review_action_text(event)
+        action_match = ACTION_RE.fullmatch(action_text)
         quote = review_quote(event)
         if quote is None:
+            return
+        if action_match is None:
+            config = self.context.get_config(self._event_group_umo(event))
+            for prefix in config.get("wake_prefix", []):
+                if prefix and action_text.startswith(prefix):
+                    action_match = ACTION_RE.fullmatch(
+                        action_text[len(prefix) :].strip()
+                    )
+                    break
+        if action_match is None:
             return
         try:
             matched = self.storage.find_pending_by_quote(
@@ -1029,7 +1047,7 @@ class QQGroupAdminPlugin(Star):
             return
         targets = self._mentioned_members(event)
         if not targets:
-            yield event.plain_result("请艾特要禁言的成员，例如：/禁言 @用户 [时间]")
+            yield event.plain_result("请艾特要禁言的成员，例如：禁言 @用户 [时间]")
             return
         try:
             time = extract_mute_duration(
@@ -1070,7 +1088,7 @@ class QQGroupAdminPlugin(Star):
             return
         targets = self._mentioned_members(event)
         if not targets:
-            yield event.plain_result("请艾特要解除禁言的成员，例如：/解禁 @用户")
+            yield event.plain_result("请艾特要解除禁言的成员，例如：解禁 @用户")
             return
         failure = await self._mute_members(event, targets, 0)
         if failure:
@@ -1188,7 +1206,7 @@ class QQGroupAdminPlugin(Star):
                 enabled = False
             else:
                 yield event.plain_result(
-                    f"用法：/群管功能 {feature.name} 开启（或关闭）"
+                    f"用法：群管功能 {feature.name} 开启（或关闭）"
                 )
                 return
             raw_value = not enabled if feature.inverted else enabled
@@ -1614,6 +1632,20 @@ class QQGroupAdminPlugin(Star):
         whitelist = {str(item).strip() for item in configured if str(item).strip()}
         return not whitelist or umo in whitelist
 
+    async def _sdk_group_enabled(self, umo: str) -> bool:
+        if not self._umo_enabled(umo):
+            return False
+        try:
+            plugins = self.context.get_config(umo).get("plugin_set", ["*"])
+            if plugins != ["*"] and PLUGIN_NAME not in plugins:
+                return False
+            return await SessionPluginManager.is_plugin_enabled_for_session(
+                umo, PLUGIN_NAME
+            )
+        except Exception:
+            logger.exception("[%s] 无法读取会话插件状态，已拒绝 SDK 事件", PLUGIN_NAME)
+            return False
+
     @staticmethod
     def _group_umo(platform_id: str, group_openid: str) -> str:
         return f"{platform_id}:GroupMessage:{group_openid}"
@@ -1664,6 +1696,14 @@ class QQGroupAdminPlugin(Star):
 
     @staticmethod
     def _restore_client_handlers(state: dict[str, Any]) -> None:
+        for connection, old_parsers, owned_parsers in state["connections"].values():
+            for name, parser in owned_parsers.items():
+                if connection.parser.get(name) is not parser:
+                    continue
+                if old_parsers[name] is None:
+                    connection.parser.pop(name, None)
+                else:
+                    connection.parser[name] = old_parsers[name]
         client = state["client"]
         for attr, old_handler in state["old_handlers"].items():
             if getattr(client, attr, None) is not state["owned_handlers"][attr]:

@@ -6,6 +6,52 @@ from astrbot_plugin_qq_group_admin.main import QQGroupAdminPlugin, format_reques
 
 
 class ReviewFixTests(unittest.IsolatedAsyncioTestCase):
+    async def test_astrbot_wakes_bare_mentions_and_configured_prefixes(self):
+        from astrbot.api.message_components import At, Plain
+        from astrbot.core.pipeline.waking_check.stage import WakingCheckStage
+        from astrbot.core.platform.astr_message_event import AstrMessageEvent
+        from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+        from astrbot.core.platform.message_type import MessageType
+        from astrbot.core.platform.platform_metadata import PlatformMetadata
+        from astrbot.core.star.filter.command import CommandFilter
+
+        command_filter = CommandFilter("群管功能")
+        command_filter.handler_params = {}
+        for prefix in ("/", "!", "云云 "):
+            config = {"wake_prefix": [prefix], "platform_settings": {}, "admins_id": []}
+            stage = WakingCheckStage()
+            await stage.initialize(SimpleNamespace(astrbot_config=config))
+            for text, expected in (
+                ("群管功能", True),
+                (prefix + "群管功能", True),
+                ("/群管功能", prefix == "/"),
+            ):
+                with self.subTest(prefix=prefix, text=text):
+                    message = AstrBotMessage()
+                    message.type = MessageType.GROUP_MESSAGE
+                    message.self_id, message.group_id = "bot", "group"
+                    message.sender = MessageMember("member", "tester")
+                    message.message = [At(qq="bot"), Plain(text=text)]
+                    event = AstrMessageEvent(
+                        text,
+                        message,
+                        PlatformMetadata("qq_official", "test", "p"),
+                        "group",
+                    )
+                    with (
+                        patch(
+                            "astrbot.core.pipeline.waking_check.stage.star_handlers_registry.get_handlers_by_event_type",
+                            return_value=[],
+                        ),
+                        patch(
+                            "astrbot.core.pipeline.waking_check.stage.SessionPluginManager.filter_handlers_by_session",
+                            new=AsyncMock(return_value=[]),
+                        ),
+                    ):
+                        await stage.process(event)
+                    self.assertTrue(event.is_at_or_wake_command)
+                    self.assertEqual(command_filter.filter(event, config), expected)
+
     def setUp(self):
         self.plugin = object.__new__(QQGroupAdminPlugin)
         self.plugin.config = {
