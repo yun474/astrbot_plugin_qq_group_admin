@@ -337,7 +337,8 @@ def format_group_admin_help(default_duration: str) -> str:
         "纯数字按分钟处理，例如 `30` 表示 **30分钟**\n\n"
         "## 入群审批\n\n"
         "点击申请通知下方的同意 / 拒绝按钮，直接完成审批。\n\n"
-        "群主、QQ 群管理员、AstrBot 管理员和插件群管共用同意 / 拒绝按钮。\n\n"
+        "第一行「群管同意 / 群管拒绝」：QQ 群主、QQ 群管理员可操作。\n\n"
+        "第二行「授权同意 / 授权拒绝」：发卡时的 AstrBot 管理员和本群插件群管可操作，点击时会再次检查授权。\n\n"
         "拒绝并填写理由时，可引用申请通知回复 `拒绝 理由`。\n\n"
         "---\n\n"
         "💡 AstrBot 管理员拥有全局权限；插件群管和 QQ 群主/管理员拥有本群普通群管权限。"
@@ -408,7 +409,7 @@ def review_quote(event: AstrMessageEvent) -> set[str] | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.6.0",
+    "2.6.1",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -1037,10 +1038,12 @@ class QQGroupAdminPlugin(Star):
             )
             seconds = parse_duration(time)
             self._validate_duration(seconds)
-            for member_openid in targets:
-                await self._mute(event, event.get_group_id(), member_openid, seconds)
         except Exception as exc:
             yield event.plain_result(f"禁言失败：{exc}")
+            return
+        failure = await self._mute_members(event, targets, seconds)
+        if failure:
+            yield event.plain_result(failure)
             return
         if self._event_feature_setting(
             event,
@@ -1069,11 +1072,9 @@ class QQGroupAdminPlugin(Star):
         if not targets:
             yield event.plain_result("请艾特要解除禁言的成员，例如：/解禁 @用户")
             return
-        try:
-            for member_openid in targets:
-                await self._mute(event, event.get_group_id(), member_openid, 0)
-        except Exception as exc:
-            yield event.plain_result(f"解禁失败：{exc}")
+        failure = await self._mute_members(event, targets, 0)
+        if failure:
+            yield event.plain_result(failure)
             return
         if self._event_feature_setting(
             event,
@@ -1332,13 +1333,13 @@ class QQGroupAdminPlugin(Star):
         self,
         event: Any,
         cursor: str = "",
-        limit: int = 20,
+        limit: int = 0,
     ) -> str:
         """拉取当前 QQ 群待处理的入群申请列表，开启严格权限审查时仅群管可用。
 
         Args:
             cursor(string): 分页游标，第一页传空字符串
-            limit(number): 拉取条数，范围 1 到 100
+            limit(number): 拉取条数，范围 1 到 100；省略或填 0 使用插件配置的默认条数
         """
         event = resolve_tool_event(event)
         if not self._is_qq_group(event):
@@ -1361,7 +1362,14 @@ class QQGroupAdminPlugin(Star):
         items = result.get("list", []) if isinstance(result, dict) else []
         if not items:
             return "当前没有待处理的入群申请。"
-        text = "\n\n".join(format_request(item) for item in items)
+        # Tool results need the identifiers consumed by the review tool;
+        # public notification cards deliberately keep using format_request alone.
+        text = "\n\n".join(
+            f"{format_request(item)}\n"
+            f"member_openid：{item.get('member_openid') or ''}\n"
+            f"join_request_id：{item.get('join_request_id') or ''}"
+            for item in items
+        )
         next_cursor = result.get("next_cursor", "") if isinstance(result, dict) else ""
         if next_cursor:
             text += f"\n\n下一页 cursor：{next_cursor}"
@@ -1410,6 +1418,23 @@ class QQGroupAdminPlugin(Star):
         if action == "approve":
             return "已同意入群申请，请根据用户语境自然回复。"
         return "已拒绝入群申请，请根据用户语境自然回复。"
+
+    async def _mute_members(
+        self, event: AstrMessageEvent, targets: list[str], seconds: int
+    ) -> str | None:
+        failures: list[str] = []
+        for member_openid in targets:
+            try:
+                await self._mute(event, event.get_group_id(), member_openid, seconds)
+            except Exception as exc:
+                failures.append(f"- {member_openid}：{exc}")
+        if not failures:
+            return None
+        action = "解禁" if seconds == 0 else "禁言"
+        return (
+            f"{action}结果：成功 {len(targets) - len(failures)} 名，"
+            f"失败 {len(failures)} 名。\n失败成员：\n" + "\n".join(failures)
+        )
 
     async def _mute(
         self,
