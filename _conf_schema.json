@@ -187,6 +187,59 @@
       }
     }
   },
+  "keyword_settings": {
+    "description": "⑧ 关键词管理",
+    "type": "object",
+    "hint": "功能开关可按群覆盖，词表、优先规则和禁言时长由所有群共用。按包含关系匹配，忽略英文字母大小写和词条首尾空白，空词条不生效，不支持正则。",
+    "items": {
+      "enable_join_keyword_review": {
+        "description": "启用入群关键词自动审批",
+        "type": "bool",
+        "default": false,
+        "hint": "只检查入群问题的回答，不检查问题、昵称或验证消息。命中白词同意、黑词拒绝；未命中继续人工审批。独立于申请通知和人工审批开关。"
+      },
+      "join_whitelist_words": {
+        "description": "进群白词",
+        "type": "list",
+        "items": { "type": "string" },
+        "default": [],
+        "hint": "任一回答包含任一白词时自动同意；留空不自动同意。"
+      },
+      "join_blacklist_words": {
+        "description": "进群黑词",
+        "type": "list",
+        "items": { "type": "string" },
+        "default": [],
+        "hint": "任一回答包含任一黑词时自动拒绝；留空不自动拒绝。"
+      },
+      "join_keyword_priority": {
+        "description": "同时命中白词和黑词时的优先规则",
+        "type": "string",
+        "options": ["黑词优先", "白词优先"],
+        "default": "黑词优先",
+        "hint": "黑词优先：同时命中则拒绝；白词优先：同时命中则同意。不同回答分别命中白词和黑词也按此规则处理。"
+      },
+      "enable_keyword_mute": {
+        "description": "启用违禁词自动禁言",
+        "type": "bool",
+        "default": false,
+        "hint": "检查机器人实际收到的 QQ 群消息正文，命中后禁言发送者并停止后续指令和 LLM 处理。成功、失败均不向群里提示，失败仅记日志；不检查引用原文、图片或语音。"
+      },
+      "mute_keywords": {
+        "description": "消息违禁词",
+        "type": "list",
+        "items": { "type": "string" },
+        "default": [],
+        "hint": "消息正文包含任一词条即触发，留空不处理。"
+      },
+      "keyword_mute_duration": {
+        "description": "违禁词禁言时长",
+        "type": "string",
+        "default": "10分",
+        "hint": "支持 30秒、10分、2小时、1天2小时；纯数字按分钟。必须大于 0，且不超过安全限制中的单次最长禁言秒数。"
+      }
+    }
+  },
   "config_layout_version": {
     "description": "配置布局版本",
     "type": "int",
