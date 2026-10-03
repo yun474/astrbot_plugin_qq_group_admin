@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,6 +18,8 @@ from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
 from .storage import PluginStorage
+from .group_config import GroupConfig
+from .settings_menu import WORD_LISTS, KEYWORD_VALUES, keyword_summary, word_page
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
 QQ_PLATFORMS = {"qq_official", "qq_official_webhook"}
@@ -460,6 +463,11 @@ class QQGroupAdminPlugin(Star):
             data_dir / "state.json",
             int(self._config("pending_retention_days", 30)),
         )
+        unresolved = GroupConfig(self.config).migrate(self.storage, self.context)
+        if unresolved:
+            logger.warning(
+                "[%s] 以下旧分群记录需要在 UMO 列表核对：%s", PLUGIN_NAME, unresolved
+            )
         self._patched: dict[str, dict[str, Any]] = {}
         self._patch_task: asyncio.Task | None = None
         self._parser_state_class: Any = None
@@ -734,7 +742,9 @@ class QQGroupAdminPlugin(Star):
             if notice_type == "member_join"
             else "有成员退出了群聊。"
         )
-        template = str(self._config(template_key, default) or "").strip()
+        template = str(
+            self._group_setting(template_key, group_umo, default) or ""
+        ).strip()
         if not template:
             return
         platform = self.context.get_platform_inst(platform_id)
@@ -858,11 +868,12 @@ class QQGroupAdminPlugin(Star):
     async def _auto_review_join_request(
         self, platform_id: str, client: Any, item: dict[str, Any]
     ) -> bool:
+        group_umo = self._group_umo(platform_id, str(item.get("group_openid") or ""))
         approve = join_keyword_decision(
             item,
-            self._config("join_whitelist_words", []),
-            self._config("join_blacklist_words", []),
-            self._config("join_keyword_priority", "黑词优先"),
+            self._group_setting("join_whitelist_words", group_umo, []),
+            self._group_setting("join_blacklist_words", group_umo, []),
+            self._group_setting("join_keyword_priority", group_umo, "黑词优先"),
         )
         if approve is None:
             return False
@@ -1066,18 +1077,26 @@ class QQGroupAdminPlugin(Star):
         sender = event.get_sender_id()
         if not sender or sender == event.get_self_id():
             return
+        if (
+            event.is_at_or_wake_command
+            and re.match(r"^群管功能(?:\s|$)", event.get_message_str().strip())
+            and self._can_manage(event)
+        ):
+            return  # Let authorized users edit the word list without punishing its contents.
         text = "".join(
             part.text for part in event.get_messages() if isinstance(part, Plain)
         )
-        if not contains_keyword(text, self._config("mute_keywords", [])):
+        if not contains_keyword(text, self._event_setting(event, "mute_keywords", [])):
             return
         if not await self._sdk_group_enabled(self._event_group_umo(event)):
             return
         # Consume matched messages even if QQ rejects the mute, keeping commands/LLM silent.
         event.stop_event()
         try:
-            seconds = parse_duration(str(self._config("keyword_mute_duration", "10分")))
-            self._validate_duration(seconds)
+            seconds = parse_duration(
+                str(self._event_setting(event, "keyword_mute_duration", "10分"))
+            )
+            self._validate_duration(seconds, self._event_group_umo(event))
             if seconds == 0:
                 raise ValueError("违禁词禁言时长必须大于 0")
             await self._mute(event, event.get_group_id(), sender, seconds)
@@ -1165,10 +1184,12 @@ class QQGroupAdminPlugin(Star):
         try:
             time = extract_mute_duration(
                 event.get_message_str(),
-                str(self._config("default_mute_duration", "1分") or "1分"),
+                str(
+                    self._event_setting(event, "default_mute_duration", "1分") or "1分"
+                ),
             )
             seconds = parse_duration(time)
-            self._validate_duration(seconds)
+            self._validate_duration(seconds, self._event_group_umo(event))
         except Exception as exc:
             yield event.plain_result(f"禁言失败：{exc}")
             return
@@ -1281,7 +1302,9 @@ class QQGroupAdminPlugin(Star):
             return
         if not self._event_feature_setting(event, "enable_group_admin_commands"):
             return
-        default_duration = str(self._config("default_mute_duration", "1分") or "1分")
+        default_duration = str(
+            self._event_setting(event, "default_mute_duration", "1分") or "1分"
+        )
         yield event.plain_result(
             format_group_admin_help(default_duration)
         ).use_markdown(True)
@@ -1292,13 +1315,17 @@ class QQGroupAdminPlugin(Star):
         event: AstrMessageEvent,
         feature_name: str = "",
         action: str = "",
+        value: str = "",
     ) -> None:
         """查看或修改当前群的独立功能开关。"""
         if not self._is_qq_group(event):
             yield event.plain_result("该指令仅支持已启用的 QQ 官方机器人群聊。")
             return
         per_group = bool(self._config("enable_per_group_feature_settings", False))
-        changing = bool(feature_name or action)
+        changing = bool(feature_name or action) and not (
+            (feature_name in WORD_LISTS or feature_name in KEYWORD_VALUES)
+            and action in {"", "查看"}
+        )
         if not per_group and changing and not self._is_astr_admin(event):
             yield event.plain_result("你没有权限更改配置项，别乱动人家的功能啊！")
             return
@@ -1306,10 +1333,28 @@ class QQGroupAdminPlugin(Star):
             yield event.plain_result("你没有本群群管权限。")
             return
 
+        if feature_name in WORD_LISTS or feature_name in KEYWORD_VALUES:
+            # AstrBot's older command parser splits string args on spaces. Read the
+            # remaining original text so one phrase stays one word-list entry.
+            parts = event.get_message_str().strip().split(maxsplit=3)
+            if parts and parts[0] == "群管功能" and len(parts) == 4:
+                value = parts[3]
+            try:
+                result = self._keyword_config_command(
+                    event, feature_name, action, value
+                )
+            except (ValueError, OSError) as exc:
+                yield event.plain_result(f"配置未修改：{exc}")
+                return
+            yield event.plain_result(result).use_markdown(True)
+            return
+
         if feature_name or action:
             feature = FEATURES_BY_NAME.get(feature_name.strip())
             if feature is None:
-                available = "、".join(item.name for item in FEATURES)
+                available = "、".join(
+                    [*(item.name for item in FEATURES), *WORD_LISTS, *KEYWORD_VALUES]
+                )
                 yield event.plain_result(f"未知功能。可用功能：{available}")
                 return
             normalized_action = action.strip()
@@ -1324,14 +1369,7 @@ class QQGroupAdminPlugin(Star):
                 return
             raw_value = not enabled if feature.inverted else enabled
             try:
-                if per_group:
-                    self.storage.set_group_feature_override(
-                        self._event_group_umo(event),
-                        feature.key,
-                        raw_value,
-                    )
-                else:
-                    self._set_config(feature.key, raw_value)
+                self._save_setting(event, feature.key, raw_value)
             except Exception as exc:
                 yield event.plain_result(f"保存功能开关失败：{exc}")
                 return
@@ -1351,7 +1389,81 @@ class QQGroupAdminPlugin(Star):
             values[feature.name] = not raw_value if feature.inverted else raw_value
         yield event.plain_result(
             format_feature_status(values, per_group=per_group)
+            + "\n\n群 UMO：`"
+            + self._event_group_umo(event)
+            + "`"
+            + keyword_summary(
+                {
+                    **{
+                        key: self._event_setting(event, key, [])
+                        for key in WORD_LISTS.values()
+                    },
+                    "join_keyword_priority": self._event_setting(
+                        event, "join_keyword_priority", "黑词优先"
+                    ),
+                    "keyword_mute_duration": self._event_setting(
+                        event, "keyword_mute_duration", "10分"
+                    ),
+                }
+            )
         ).use_markdown(True)
+
+    def _save_setting(self, event: AstrMessageEvent, key: str, value: Any) -> None:
+        if self._config("enable_per_group_feature_settings", False):
+            GroupConfig(self.config).set_value(
+                self._event_group_umo(event), CONFIG_SECTIONS[key], key, value
+            )
+        else:
+            self._set_config(key, value)
+
+    def _keyword_config_command(
+        self, event: AstrMessageEvent, name: str, action: str, value: str
+    ) -> str:
+        value = value.strip()
+        if name in WORD_LISTS:
+            key = WORD_LISTS[name]
+            words = list(self._event_setting(event, key, []))
+            if action in {"", "查看"}:
+                return word_page(name, words, int(value or "1"))
+            if action == "清空":
+                if value != "确认":
+                    raise ValueError(f"清空需发送：群管功能 {name} 清空 确认")
+                words = []
+            elif action in {"添加", "删除"}:
+                if not value:
+                    raise ValueError(f"用法：群管功能 {name} {action} 词条")
+                normalized = [word.strip().casefold() for word in words]
+                if action == "添加":
+                    if value.casefold() in normalized:
+                        return "该词条已存在。"
+                    words.append(value)
+                elif value.casefold() in normalized:
+                    words = [
+                        word
+                        for word in words
+                        if word.strip().casefold() != value.casefold()
+                    ]
+                else:
+                    raise ValueError("词条不存在，请先查看列表")
+            else:
+                raise ValueError("支持：查看、添加、删除、清空 确认")
+            self._save_setting(event, key, words)
+            return f"{name}已保存，当前 {len(words)} 条。"
+        key = KEYWORD_VALUES[name]
+        if action in {"", "查看"}:
+            return f"{name}：{self._event_setting(event, key)}"
+        if action != "设置":
+            raise ValueError(f"用法：群管功能 {name} 设置 内容")
+        if key == "join_keyword_priority":
+            if value not in {"白词优先", "黑词优先"}:
+                raise ValueError("请选择 白词优先 或 黑词优先")
+        else:
+            seconds = parse_duration(value)
+            self._validate_duration(seconds, self._event_group_umo(event))
+            if seconds == 0:
+                raise ValueError("违禁词禁言时长必须大于 0")
+        self._save_setting(event, key, value)
+        return f"{name}已保存。"
 
     @filter.command("禁言状态")
     async def mute_status_command(self, event: AstrMessageEvent) -> None:
@@ -1395,16 +1507,16 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法使用群禁言工具。"
         if not self._event_feature_setting(event, "enable_mute_tool"):
             return "QQ 群禁言工具已关闭。"
-        if self._config("strict_llm_permissions", False) and not self._can_manage(
-            event
-        ):
+        if self._event_setting(
+            event, "strict_llm_permissions", False
+        ) and not self._can_manage(event):
             return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             duration = duration.strip() or str(
-                self._config("default_mute_duration", "1分") or "1分"
+                self._event_setting(event, "default_mute_duration", "1分") or "1分"
             )
             seconds = parse_duration(duration)
-            self._validate_duration(seconds)
+            self._validate_duration(seconds, self._event_group_umo(event))
             await self._mute(event, event.get_group_id(), member_openid, seconds)
         except Exception as exc:
             return f"禁言操作失败：{exc}"
@@ -1427,9 +1539,9 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法使用群解禁工具。"
         if not self._event_feature_setting(event, "enable_unmute_tool"):
             return "QQ 群解禁工具已关闭。"
-        if self._config("strict_llm_permissions", False) and not self._can_manage(
-            event
-        ):
+        if self._event_setting(
+            event, "strict_llm_permissions", False
+        ) and not self._can_manage(event):
             return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             await self._mute(event, event.get_group_id(), member_openid, 0)
@@ -1445,9 +1557,9 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法查询群禁言状态。"
         if not self._event_feature_setting(event, "enable_mute_status_tool"):
             return "QQ 群禁言状态工具已关闭。"
-        if self._config("strict_llm_permissions", False) and not self._can_manage(
-            event
-        ):
+        if self._event_setting(
+            event, "strict_llm_permissions", False
+        ) and not self._can_manage(event):
             return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         try:
             result = await QQGroupManageAPI(
@@ -1477,16 +1589,17 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法拉取入群申请。"
         if not self._event_feature_setting(event, "enable_join_list_tool"):
             return "入群申请列表工具已关闭。"
-        if self._config("strict_llm_permissions", False) and not self._can_manage(
-            event
-        ):
+        if self._event_setting(
+            event, "strict_llm_permissions", False
+        ) and not self._can_manage(event):
             return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         platform = self._platform(event)
         try:
             result = await QQGroupManageAPI(platform.client).list_join_requests(
                 event.get_group_id(),
                 cursor=cursor,
-                limit=limit or int(self._config("join_request_page_size", 20)),
+                limit=limit
+                or int(self._event_setting(event, "join_request_page_size", 20)),
             )
         except Exception as exc:
             return f"拉取入群申请失败：{exc}"
@@ -1528,9 +1641,9 @@ class QQGroupAdminPlugin(Star):
             return "当前场景不是 QQ 官方机器人群聊，无法审批入群申请。"
         if not self._event_feature_setting(event, "enable_join_review_tool"):
             return "入群申请审批工具已关闭。"
-        if self._config("strict_llm_permissions", False) and not self._can_manage(
-            event
-        ):
+        if self._event_setting(
+            event, "strict_llm_permissions", False
+        ) and not self._can_manage(event):
             return "唤醒人没有本群群管权限，严格权限审查已拒绝此次工具调用。"
         action = action.strip().lower()
         if action not in {"approve", "decline"}:
@@ -1638,6 +1751,13 @@ class QQGroupAdminPlugin(Star):
             save()
 
     def _config(self, key: str, default: Any = None) -> Any:
+        if self.config.get("config_layout_version", 0) >= 2:
+            management = self.config["group_management"]
+            if key == "enable_per_group_feature_settings":
+                return management["enabled"]
+            section = management["global_settings"].get(CONFIG_SECTIONS.get(key), {})
+            if key in section:
+                return section[key]
         section_name = CONFIG_SECTIONS.get(key)
         section = self.config.get(section_name, {}) if section_name else {}
         if isinstance(section, dict) and key in section:
@@ -1646,6 +1766,18 @@ class QQGroupAdminPlugin(Star):
 
     def _set_config(self, key: str, value: Any) -> None:
         section_name = CONFIG_SECTIONS.get(key)
+        if self.config.get("config_layout_version", 0) >= 2:
+            before = deepcopy(dict(self.config))
+            try:
+                self.config["group_management"]["global_settings"][section_name][
+                    key
+                ] = value
+                GroupConfig(self.config).save()
+            except Exception:
+                self.config.clear()
+                self.config.update(before)
+                raise
+            return
         if section_name:
             section = self.config.get(section_name)
             if not isinstance(section, dict):
@@ -1666,20 +1798,30 @@ class QQGroupAdminPlugin(Star):
         group_umo: str,
         default: bool = True,
     ) -> bool:
-        global_value = bool(self._config(key, default))
+        return bool(self._group_setting(key, group_umo, default))
+
+    def _group_setting(self, key: str, group_umo: str, default: Any = None) -> Any:
+        global_value = self._config(key, default)
         if not self._config("enable_per_group_feature_settings", False):
+            return global_value
+        if self.config.get("config_layout_version", 0) >= 2:
+            profile = GroupConfig(self.config).profile(group_umo)
+            if profile is not None:
+                return profile.get(CONFIG_SECTIONS.get(key), {}).get(key, global_value)
             return global_value
         getter = getattr(self.storage, "group_feature_override", None)
         override = getter(group_umo, key) if callable(getter) else None
         return global_value if override is None else override
 
     def _event_group_umo(self, event: AstrMessageEvent) -> str:
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
-        if umo:
-            return umo
-        get_platform_id = getattr(event, "get_platform_id", None)
-        platform_id = str(get_platform_id() if callable(get_platform_id) else "")
-        return self._group_umo(platform_id, event.get_group_id())
+        return self._group_umo(event.get_platform_id(), event.get_group_id())
+
+    def _event_setting(
+        self, event: AstrMessageEvent, key: str, default: Any = None
+    ) -> Any:
+        if not self._config("enable_per_group_feature_settings", False):
+            return self._config(key, default)
+        return self._group_setting(key, self._event_group_umo(event), default)
 
     def _event_feature_setting(
         self,
@@ -1716,9 +1858,17 @@ class QQGroupAdminPlugin(Star):
             return True
         role = self._qq_member_role(event)
         if role == "owner":
-            return bool(self._config("allow_group_owner_manage_plugin_admins", False))
+            return bool(
+                self._event_setting(
+                    event, "allow_group_owner_manage_plugin_admins", False
+                )
+            )
         if role == "admin":
-            return bool(self._config("allow_group_admin_manage_plugin_admins", False))
+            return bool(
+                self._event_setting(
+                    event, "allow_group_admin_manage_plugin_admins", False
+                )
+            )
         return False
 
     @staticmethod
@@ -1735,7 +1885,7 @@ class QQGroupAdminPlugin(Star):
         return (
             event.get_platform_name() in QQ_PLATFORMS
             and bool(event.get_group_id())
-            and self._umo_enabled(str(getattr(event, "unified_msg_origin", "") or ""))
+            and self._umo_enabled(self._event_group_umo(event))
         )
 
     def _umo_enabled(self, umo: str) -> bool:
@@ -1796,8 +1946,10 @@ class QQGroupAdminPlugin(Star):
                     targets.append(str(part.qq))
         return targets[:10]
 
-    def _validate_duration(self, seconds: int) -> None:
-        maximum = max(1, int(self._config("max_mute_seconds", 2592000)))
+    def _validate_duration(self, seconds: int, group_umo: str = "") -> None:
+        maximum = max(
+            1, int(self._group_setting("max_mute_seconds", group_umo, 2592000))
+        )
         if seconds < 0 or seconds > maximum:
             raise ValueError(f"禁言时长必须在 0 到 {maximum} 秒之间")
 

@@ -66,6 +66,7 @@ class ReviewFixTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._mentioned_members = lambda event: ["first", "second", "third"]
         self.event = SimpleNamespace(
             get_group_id=lambda: "group",
+            get_platform_id=lambda: "p",
             get_platform_name=lambda: "qq_official",
             get_message_str=lambda: "/禁言 2分",
             plain_result=lambda text: text,

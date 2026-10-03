@@ -29,6 +29,7 @@ from astrbot_plugin_qq_group_admin.main import (
 )
 from astrbot_plugin_qq_group_admin.api import QQBotRoute, QQGroupManageAPI
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
+from astrbot_plugin_qq_group_admin.group_config import GroupConfig
 
 
 async def _collect_async_generator(generator):
@@ -67,17 +68,22 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(plugin._umo_enabled("bot-1:GroupMessage:group-2"))
         self.assertFalse(plugin._umo_enabled("bot-1:GroupMessage:group-3"))
 
-    def test_message_event_uses_its_exact_umo_for_whitelist(self) -> None:
+    def test_message_event_uses_real_group_umo_for_whitelist(self) -> None:
         class Event:
-            unified_msg_origin = "bot-1:GroupMessage:group-1"
+            unified_msg_origin = "bot-1:GroupMessage:member-1"
+            platform_id = "bot-1"
+
+            @staticmethod
+            def get_platform_id():
+                return Event.platform_id
+
+            @staticmethod
+            def get_group_id():
+                return "group-1"
 
             @staticmethod
             def get_platform_name() -> str:
                 return "qq_official"
-
-            @staticmethod
-            def get_group_id() -> str:
-                return "group-1"
 
         plugin = object.__new__(QQGroupAdminPlugin)
         plugin.config = {
@@ -85,7 +91,7 @@ class CoreTests(unittest.TestCase):
         }
 
         self.assertTrue(plugin._is_qq_group(Event()))
-        Event.unified_msg_origin = "bot-2:GroupMessage:group-1"
+        Event.platform_id = "bot-2"
         self.assertFalse(plugin._is_qq_group(Event()))
 
     def test_join_notice_is_silent_outside_group_whitelist(self) -> None:
@@ -433,6 +439,10 @@ class CoreTests(unittest.TestCase):
     def test_silent_notice_config_never_stops_llm_natural_reply(self) -> None:
         class Event:
             @staticmethod
+            def get_platform_id():
+                return "bot-1"
+
+            @staticmethod
             def get_platform_name() -> str:
                 return "qq_official"
 
@@ -449,7 +459,7 @@ class CoreTests(unittest.TestCase):
             "silent_mute_success_notice": True,
         }
         plugin._mute = fake_mute
-        plugin._validate_duration = lambda seconds: None
+        plugin._validate_duration = lambda seconds, umo="": None
         result = asyncio.run(plugin.mute_tool(Event(), "member-1", "1分"))
         self.assertIn("请根据用户语境自然回复", result)
         self.assertNotIn("不要在最终回复", result)
@@ -765,27 +775,30 @@ class CoreTests(unittest.TestCase):
                 return self
 
         class Event:
-            unified_msg_origin = "bot-1:GroupMessage:group-1"
+            unified_msg_origin = "bot-1:GroupMessage:member-1"
+            platform_id = "bot-1"
+
+            @staticmethod
+            def get_platform_id():
+                return Event.platform_id
+
+            @staticmethod
+            def get_group_id():
+                return "group-1"
 
             @staticmethod
             def plain_result(text: str) -> Result:
                 return Result(text)
 
-        overrides = {}
         plugin = object.__new__(QQGroupAdminPlugin)
-        plugin.config = {
-            "scope_settings": {
-                "enable_per_group_feature_settings": True,
-            },
-        }
+        plugin.config = {"scope_settings": {"enable_per_group_feature_settings": True}}
         plugin._is_qq_group = lambda event: True
         plugin._can_manage = lambda event: True
-        plugin.storage = SimpleNamespace(
-            group_feature_override=lambda umo, key: overrides.get((umo, key)),
-            set_group_feature_override=lambda umo, key, value: overrides.__setitem__(
-                (umo, key), value
-            ),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            storage = PluginStorage(Path(directory) / "state.json")
+            GroupConfig(plugin.config).migrate(
+                storage, SimpleNamespace(get_config=lambda umo: {})
+            )
 
         results = asyncio.run(
             _collect_async_generator(
@@ -798,12 +811,9 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            overrides[
-                (
-                    "bot-1:GroupMessage:group-1",
-                    "silent_mute_success_notice",
-                )
-            ]
+            GroupConfig(plugin.config).profile("bot-1:GroupMessage:group-1")[
+                "command_settings"
+            ]["silent_mute_success_notice"]
         )
         self.assertFalse(results[0].markdown)
         self.assertEqual(results[0].text, "禁言成功提示已关闭。")
