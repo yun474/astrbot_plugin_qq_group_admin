@@ -386,6 +386,83 @@ class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_old_profiles_get_independent_defaults_without_rewriting_words(self):
+        self.migrate()
+        words = [" a.b ", "C++", "[广告]", r"\d+", ""]
+        for confirmed in (True, False):
+            profile = self.store.snapshot(f"p:GroupMessage:{confirmed}")
+            profile["confirmed"] = confirmed
+            keywords = profile["keyword_settings"]
+            keywords.pop("enable_keyword_recall")
+            keywords.pop("join_keyword_match_mode")
+            keywords["join_whitelist_words"] = words.copy()
+            self.store.data["groups"].append(profile)
+        explicit = self.store.snapshot("p:GroupMessage:explicit")
+        explicit["keyword_settings"].update(
+            enable_keyword_recall=True, join_keyword_match_mode="正则匹配"
+        )
+        self.store.data["groups"].append(explicit)
+        self.store.data["enabled"] = False
+        self.store.data["global_settings"]["keyword_settings"].update(
+            enable_keyword_recall=True, join_keyword_match_mode="正则匹配"
+        )
+        self.store.save()
+        reloaded = AstrBotConfig(str(self.path), schema=SCHEMA)
+        store = GroupConfig(reloaded)
+        store.migrate(self.storage, self.context)
+        reloaded = AstrBotConfig(str(self.path), schema=SCHEMA)
+        self.plugin.config = reloaded
+        self.plugin.config["group_management"]["enabled"] = True
+        self.assertFalse(
+            self.plugin._event_setting(
+                self.event(group="True"), "enable_keyword_recall"
+            )
+        )
+        self.assertEqual(
+            self.plugin._event_setting(
+                self.event(group="True"), "join_keyword_match_mode"
+            ),
+            "包含匹配",
+        )
+        profiles = GroupConfig(reloaded).data["groups"]
+        for profile in profiles[:2]:
+            keywords = profile["keyword_settings"]
+            self.assertFalse(keywords["enable_keyword_recall"])
+            self.assertEqual(keywords["join_keyword_match_mode"], "包含匹配")
+            self.assertEqual(keywords["join_whitelist_words"], words)
+        self.assertEqual(profiles[2], explicit)
+        with patch.object(AstrBotConfig, "save_config") as save:
+            GroupConfig(reloaded).migrate(self.storage, self.context)
+        save.assert_not_called()
+
+    def test_profile_completion_rolls_back_when_save_fails(self):
+        self.migrate()
+        profile = self.store.snapshot("p:GroupMessage:g")
+        profile["keyword_settings"].pop("enable_keyword_recall")
+        self.store.data["groups"].append(profile)
+        self.store.save()
+        before = deepcopy(dict(self.config))
+        original_file = self.path.read_bytes()
+        with patch.object(
+            AstrBotConfig, "save_config", side_effect=OSError("disk full")
+        ):
+            with self.assertRaises(OSError):
+                self.store.migrate(self.storage, self.context)
+        self.assertEqual(self.config, before)
+        self.assertEqual(self.path.read_bytes(), original_file)
+
+    def test_profile_completion_fills_missing_section_without_global_values(self):
+        self.migrate()
+        profile = self.store.snapshot("p:GroupMessage:g")
+        profile.pop("keyword_settings")
+        self.store.data["groups"].append(profile)
+        self.store.data["global_settings"]["keyword_settings"][
+            "enable_keyword_recall"
+        ] = True
+        self.store.migrate(self.storage, self.context)
+        self.assertFalse(profile["keyword_settings"]["enable_keyword_recall"])
+        self.assertEqual(profile["keyword_settings"]["join_whitelist_words"], [])
+
     def test_dashboard_validator_accepts_migrated_and_chat_written_profiles(self):
         from astrbot.dashboard.services.config_service import validate_config
 

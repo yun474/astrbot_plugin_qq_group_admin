@@ -842,6 +842,15 @@ class QQGroupAdminPlugin(Star):
         admin_ids = []
         pending_key = ""
         if not auto_approved:
+            # Reservation is synchronous: a replay cannot replace the first
+            # notification's tokens while its send is still awaiting QQ.
+            if (
+                self.storage.find_pending_by_join_request_id(
+                    str(item.get("join_request_id") or ""), group_openid, platform_id
+                )
+                is not None
+            ):
+                return
             admin_ids = self._callback_admin_ids(platform_id, group_openid)
             stored["review_callbacks"] = {
                 secrets.token_hex(16): {"action": action, "audience": audience}
@@ -887,9 +896,11 @@ class QQGroupAdminPlugin(Star):
                     message_id,
                     ref_idx,
                 )
-        except Exception:
+        except (Exception, asyncio.CancelledError) as exc:
             if pending_key:
                 self.storage.remove_pending(pending_key)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             logger.exception("[%s] 转发入群申请失败", PLUGIN_NAME)
 
     async def _auto_review_join_request(

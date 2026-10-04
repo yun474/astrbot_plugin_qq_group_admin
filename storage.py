@@ -163,9 +163,17 @@ class PluginStorage:
         item["stored_at"] = datetime.now(timezone.utc).isoformat()
         join_request_id = str(item["join_request_id"])
         key = f"request:{item.get('platform_id', '')}:{group_openid}:{join_request_id}"
+        previous = self.data["pending"].get(key)
         self.data["pending"][key] = item
         self.prune(save=False)
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            if previous is None:
+                self.data["pending"].pop(key, None)
+            else:
+                self.data["pending"][key] = previous
+            raise
         return key
 
     def bind_pending_message(

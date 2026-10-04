@@ -88,6 +88,7 @@ class GroupConfig:
 
     def migrate(self, storage: Any, context: Any) -> list[str]:
         if int(self.config.get("config_layout_version", 0)) >= 2:
+            self._complete_profiles()
             return []
         before = deepcopy(dict(self.config))
         old_groups = storage.data.get("group_feature_overrides", {})
@@ -161,3 +162,25 @@ class GroupConfig:
             self.config.update(before)
             raise
         return unresolved
+
+    def _complete_profiles(self) -> None:
+        """AstrBot does not fill new fields inside existing template_list entries."""
+        before = deepcopy(dict(self.config))
+        template = SCHEMA["group_management"]["items"]["groups"]["templates"]["group"]
+        changed = False
+        try:
+            for profile in self.data["groups"]:
+                for section in GROUP_SECTIONS:
+                    values = profile.setdefault(section, {})
+                    for key, value in defaults(
+                        template["items"][section]["items"]
+                    ).items():
+                        if key not in values:
+                            values[key] = value
+                            changed = True
+            if changed:
+                self.save()
+        except Exception:
+            self.config.clear()
+            self.config.update(before)
+            raise

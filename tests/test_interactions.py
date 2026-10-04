@@ -19,6 +19,7 @@ from astrbot_plugin_qq_group_admin.main import (
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
 from botpy.connection import ConnectionState
 from botpy.interaction import Interaction
+from http_fakes import make_http
 
 
 class Event:
@@ -1004,24 +1005,28 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         stage.agent_sub_stage.process.assert_not_called()
 
     async def test_ack_api_uses_new_domain_and_encoded_interaction_id(self):
-        api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
+        http = make_http(empty=True)
+        api = QQGroupManageAPI(NS(api=NS(_http=http)))
         await api.acknowledge_interaction("id/unsafe", 5)
-        call = api.client.api._http.request.await_args
-        self.assertIn("api.bot.qq.com/interactions/id%2Funsafe", call.args[0].url)
+        call = http._session.request.call_args
+        self.assertIn("api.bot.qq.com/interactions/id%2Funsafe", call.kwargs["url"])
         self.assertEqual(call.kwargs["json"], {"code": 5})
 
     async def test_member_info_api_encodes_group_and_member_ids(self):
-        api = QQGroupManageAPI(NS(api=NS(_http=NS(request=AsyncMock()))))
+        http = make_http(data={"member_openid": "member/unsafe"})
+        api = QQGroupManageAPI(NS(api=NS(_http=http)))
         await api.get_group_member_info("group/unsafe", "member/unsafe")
-        route = api.client.api._http.request.await_args.args[0]
-        self.assertEqual(route.method, "GET")
+        call = http._session.request.call_args
+        self.assertEqual(call.kwargs["method"], "GET")
         self.assertIn(
-            "api.bot.qq.com/v2/groups/group%2Funsafe/members/member%2Funsafe", route.url
+            "api.bot.qq.com/v2/groups/group%2Funsafe/members/member%2Funsafe",
+            call.kwargs["url"],
         )
 
     async def new_buttons(self):
         # Each call represents a fresh application for the authorization scenario.
         self.plugin.storage.data["reviewed"].clear()
+        self.plugin.storage.data["pending"].clear()
         self.api.send_group_markdown = AsyncMock(return_value={"id": "notice"})
         await self.plugin._handle_join_request_event(
             "p", {k: v for k, v in self.pending.items() if k != "callback_token"}

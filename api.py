@@ -4,7 +4,8 @@ import secrets
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from botpy.http import Route
+from aiohttp import ClientTimeout
+from botpy.http import Route, _handle_response
 
 
 class QQBotRoute(Route):
@@ -32,7 +33,20 @@ class QQGroupManageAPI:
                 path = f"{path}?{urlencode(clean_query)}"
         route = QQBotRoute(method, path)
         kwargs = {"json": payload} if payload is not None else {}
-        return await self.client.api._http.request(route, **kwargs)
+        http = self.client.api._http
+        await http.check_session()
+        route.is_sandbox = http.is_sandbox
+        # Reuse SDK authentication/session, but let transport errors propagate.
+        # BotHttp.request swallows timeouts and retries connection resets, which
+        # cannot safely establish whether a moderation action succeeded.
+        async with http._session.request(
+            method=route.method,
+            url=route.url,
+            headers=http._headers,
+            timeout=ClientTimeout(total=http.timeout),
+            **kwargs,
+        ) as response:
+            return await _handle_response(response)
 
     async def mute_member(
         self,

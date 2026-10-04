@@ -13,6 +13,7 @@ from botpy.message import GroupMessage
 from astrbot_plugin_qq_group_admin.api import QQGroupManageAPI
 from astrbot_plugin_qq_group_admin.main import join_keyword_decision
 import test_keywords
+from http_fakes import make_http
 
 
 class RecallRegexTests(unittest.IsolatedAsyncioTestCase):
@@ -122,16 +123,16 @@ class RecallRegexTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_recall_endpoint_encodes_both_ids(self):
-        http = NS(request=AsyncMock())
+        http = make_http(empty=True)
         await QQGroupManageAPI(NS(api=NS(_http=http))).recall_group_message(
             "g/one", "id/+?"
         )
-        call = http.request.await_args
-        self.assertEqual(call.args[0].method, "DELETE")
+        call = http._session.request.call_args
+        self.assertEqual(call.kwargs["method"], "DELETE")
         self.assertTrue(
-            call.args[0].url.endswith("/v2/groups/g%2Fone/messages/id%2F%2B%3F")
+            call.kwargs["url"].endswith("/v2/groups/g%2Fone/messages/id%2F%2B%3F")
         )
-        self.assertEqual(call.kwargs, {})
+        self.assertNotIn("json", call.kwargs)
 
     def test_regex_search_anchors_alternation_escapes_and_priority(self):
         cases = [
