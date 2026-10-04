@@ -483,6 +483,8 @@ class QQGroupAdminPlugin(Star):
             )
         self._patched: dict[str, dict[str, Any]] = {}
         self._patch_task: asyncio.Task | None = None
+        self._sdk_event_tasks: set[asyncio.Task] = set()
+        self._terminating = False
         self._parser_state_class: Any = None
         self._owned_parser_methods: dict[str, Any] = {}
         self._reviews_inflight: set[tuple[str, str, str]] = set()
@@ -539,8 +541,22 @@ class QQGroupAdminPlugin(Star):
         self._start_patch_task()
 
     def _start_patch_task(self) -> None:
+        if self._terminating:
+            return
         if self._patch_task is None or self._patch_task.done():
             self._patch_task = asyncio.create_task(self._patch_platforms_until_ready())
+
+    async def _run_sdk_event(self, handler: Any, *args: Any) -> Any:
+        # Own only our work, not the SDK dispatch task or another plugin's handler.
+        # A dispatch queued before unloading must not start work on the old instance.
+        if self._terminating:
+            return None
+        task = asyncio.create_task(handler(*args))
+        self._sdk_event_tasks.add(task)
+        try:
+            return await task
+        finally:
+            self._sdk_event_tasks.discard(task)
 
     async def _patch_platforms_until_ready(self) -> None:
         for _ in range(60):
@@ -549,6 +565,8 @@ class QQGroupAdminPlugin(Star):
 
     async def _patch_platforms_once(self) -> None:
         for platform in self.context.platform_manager.platform_insts:
+            if self._terminating:
+                return
             try:
                 meta = platform.meta()
             except Exception:
@@ -581,7 +599,9 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_group_join_request"],
                 ) -> None:
-                    await self._handle_join_request_event(pid, data)
+                    await self._run_sdk_event(
+                        self._handle_join_request_event, pid, data
+                    )
                     if original is not None:
                         result = original(data)
                         if hasattr(result, "__await__"):
@@ -592,7 +612,9 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_group_member_add"],
                 ) -> None:
-                    await self._handle_member_event(pid, "member_join", data)
+                    await self._run_sdk_event(
+                        self._handle_member_event, pid, "member_join", data
+                    )
                     if original is not None:
                         result = original(data)
                         if hasattr(result, "__await__"):
@@ -603,7 +625,9 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_group_member_remove"],
                 ) -> None:
-                    await self._handle_member_event(pid, "member_leave", data)
+                    await self._run_sdk_event(
+                        self._handle_member_event, pid, "member_leave", data
+                    )
                     if original is not None:
                         result = original(data)
                         if hasattr(result, "__await__"):
@@ -618,7 +642,9 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_interaction_create"],
                 ) -> None:
-                    if await self._handle_review_interaction(pid, interaction):
+                    if await self._run_sdk_event(
+                        self._handle_review_interaction, pid, interaction
+                    ):
                         return
                     if original is not None:
                         await original(interaction)
@@ -635,6 +661,8 @@ class QQGroupAdminPlugin(Star):
             patch_state = self._patched[platform_id]
             if meta.name == "qq_official":
                 await self._ensure_group_member_intent(platform, client)
+            if self._terminating:
+                return
             connections = [getattr(client, "_connection", None)]
             webhook_helper = getattr(platform, "webhook_helper", None)
             connections.append(getattr(webhook_helper, "_connection", None))
@@ -2101,12 +2129,7 @@ class QQGroupAdminPlugin(Star):
                 setattr(client, attr, old_handler)
 
     async def terminate(self) -> None:
-        if self._patch_task:
-            self._patch_task.cancel()
-            try:
-                await self._patch_task
-            except asyncio.CancelledError:
-                pass
+        self._terminating = True
         for state in self._patched.values():
             self._restore_client_handlers(state)
         self._patched.clear()
@@ -2117,6 +2140,19 @@ class QQGroupAdminPlugin(Star):
                     delattr(state_class, attr)
         self._owned_parser_methods.clear()
         self._parser_state_class = None
+        # Finish cancellation cleanup (including pending-state writes) before a
+        # reloaded instance reads state.json. Never leave an old snapshot writer alive.
+        tasks = list(self._sdk_event_tasks)
+        if self._patch_task is not None:
+            tasks.append(self._patch_task)
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("[%s] 清理后台任务时出错：%r", PLUGIN_NAME, result)
+        self._sdk_event_tasks.clear()
+        self._patch_task = None
 
 
 def render_member_notice(

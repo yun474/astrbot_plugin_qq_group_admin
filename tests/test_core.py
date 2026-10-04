@@ -220,6 +220,7 @@ class CoreTests(unittest.TestCase):
             platform_manager=SimpleNamespace(platform_insts=[platform])
         )
         plugin._patched = {}
+        plugin._terminating = False
 
         asyncio.run(plugin._patch_platforms_once())
 

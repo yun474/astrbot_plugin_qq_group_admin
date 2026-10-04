@@ -88,6 +88,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(clock.stop)
         self.plugin._patched = {}
         self.plugin._patch_task = None
+        self.plugin._sdk_event_tasks = set()
+        self.plugin._terminating = False
         self.plugin._parser_state_class = None
         self.plugin._owned_parser_methods = {}
         self.client = NS(
