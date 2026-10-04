@@ -227,6 +227,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             ("/拒绝 理由", False, "理由"),
         ):
             with self.subTest(text=text):
+                self.plugin.storage.data[
+                    "reviewed"
+                ].clear()  # Independent input variants.
                 self.plugin.storage.put_pending("notice", self.pending)
                 self.api.review_join_request.reset_mock()
                 event = Event(astr_admin=True, reply=Reply(id="notice"), text=text)
@@ -744,6 +747,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                         message_id=message_id,
                         object_response=object_response,
                     ):
+                        self.plugin.storage.data["reviewed"].clear()
                         self.plugin.storage.remove_pending("notice")
                         response = {
                             "id": message_id,
@@ -796,6 +800,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             ),
             {"message_reference": {"message_id": "REFIDX_notice=="}},
         ):
+            self.plugin.storage.data["reviewed"].clear()
             self.plugin.storage.put_pending(
                 "notice", {**self.pending, "ref_idx": "REFIDX_notice=="}
             )
@@ -931,6 +936,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 "api_error",
             ):
                 with self.subTest(platform=platform, case=case):
+                    self.plugin.storage.data["reviewed"].clear()
                     self.plugin.storage.put_pending("notice", self.pending)
                     self.api.review_join_request.reset_mock(side_effect=True)
                     reply_id = {
@@ -1014,6 +1020,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def new_buttons(self):
+        # Each call represents a fresh application for the authorization scenario.
+        self.plugin.storage.data["reviewed"].clear()
         self.api.send_group_markdown = AsyncMock(return_value={"id": "notice"})
         await self.plugin._handle_join_request_event(
             "p", {k: v for k, v in self.pending.items() if k != "callback_token"}

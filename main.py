@@ -19,6 +19,7 @@ from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
 from .storage import PluginStorage
 from .group_config import GroupConfig
+from .keyword_rules import JOIN_REGEX_KEYS, compile_join_pattern, match_join_rules
 from .settings_menu import WORD_LISTS, KEYWORD_VALUES, keyword_summary, word_page
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
@@ -77,6 +78,9 @@ FEATURES = (
         "入群关键词审批", "enable_join_keyword_review", "关键词管理", default=False
     ),
     FeatureDefinition("违禁词禁言", "enable_keyword_mute", "关键词管理", default=False),
+    FeatureDefinition(
+        "违禁词撤回", "enable_keyword_recall", "关键词管理", default=False
+    ),
     FeatureDefinition("LLM禁言工具", "enable_mute_tool", "LLM 工具"),
     FeatureDefinition("LLM解禁工具", "enable_unmute_tool", "LLM 工具"),
     FeatureDefinition("LLM禁言状态工具", "enable_mute_status_tool", "LLM 工具"),
@@ -114,7 +118,9 @@ CONFIG_SECTIONS = {
     "join_whitelist_words": "keyword_settings",
     "join_blacklist_words": "keyword_settings",
     "join_keyword_priority": "keyword_settings",
+    "join_keyword_match_mode": "keyword_settings",
     "enable_keyword_mute": "keyword_settings",
+    "enable_keyword_recall": "keyword_settings",
     "mute_keywords": "keyword_settings",
     "keyword_mute_duration": "keyword_settings",
 }
@@ -208,7 +214,11 @@ def contains_keyword(text: str, words: list[str]) -> bool:
 
 
 def join_keyword_decision(
-    item: dict[str, Any], whitelist: list[str], blacklist: list[str], priority: str
+    item: dict[str, Any],
+    whitelist: list[str],
+    blacklist: list[str],
+    priority: str,
+    mode: str = "包含匹配",
 ) -> bool | None:
     """Inspect answers only; questions, nicknames and verification messages are excluded."""
     if item.get("auto_approved"):
@@ -220,6 +230,8 @@ def join_keyword_decision(
     rules = [(False, blacklist), (True, whitelist)]
     if priority == "白词优先":
         rules.reverse()
+    if mode == "正则匹配":
+        return match_join_rules(answers, rules)
     for approve, words in rules:
         if any(contains_keyword(answer, words) for answer in answers):
             return approve
@@ -228,7 +240,7 @@ def join_keyword_decision(
 
 def format_request(item: dict[str, Any], *, markdown: bool = False) -> str:
     lines = [
-        "新的入群申请",
+        "入群申请已自动通过" if item.get("auto_approved") else "新的入群申请",
         f"昵称：{item.get('username') or '未提供'}",
         f"申请时间：{item.get('apply_at') or '未提供'}",
         "来源：" + format_apply_source(item.get("apply_source")),
@@ -255,7 +267,8 @@ def format_request(item: dict[str, Any], *, markdown: bool = False) -> str:
             for field in lines[1:]
             for line in field.splitlines()
         ]
-        return "# 📨 入群申请\n\n" + "  \n".join(fields)
+        title = "入群申请已自动通过" if item.get("auto_approved") else "入群申请"
+        return f"# 📨 {title}\n\n" + "  \n".join(fields)
     return "\n".join(lines)
 
 
@@ -419,7 +432,7 @@ def review_quote(event: AstrMessageEvent) -> set[str] | None:
     references = {str(reply.id)} if reply is not None and reply.id else set()
 
     # Older adapters may preserve QQ's quote fields without building a Reply.
-    raw = event.message_obj.raw_message
+    raw = getattr(event.message_obj, "raw_message", None)
     quoted = reply is not None
     for source in (raw, qq_field(raw, "raw_data")):
         reference_id = qq_field(qq_field(source, "message_reference"), "message_id")
@@ -798,6 +811,16 @@ class QQGroupAdminPlugin(Star):
         group_umo = self._group_umo(platform_id, group_openid)
         if not await self._sdk_group_enabled(group_umo):
             return
+        request_key = (
+            platform_id,
+            group_openid,
+            str(item.get("join_request_id") or ""),
+        )
+        if self.storage.is_reviewed(*request_key):
+            return
+        auto_approved = bool(item.get("auto_approved"))
+        if auto_approved:
+            self._record_reviewed_request(*request_key)
         notice_enabled = self._feature_setting("enable_join_notice", group_umo)
         auto_review_enabled = self._feature_setting(
             "enable_join_keyword_review", group_umo, False
@@ -816,16 +839,19 @@ class QQGroupAdminPlugin(Star):
         stored = dict(item)
         stored["platform_id"] = platform_id
         stored["group_openid"] = group_openid
-        admin_ids = self._callback_admin_ids(platform_id, group_openid)
-        stored["review_callbacks"] = {
-            secrets.token_hex(16): {"action": action, "audience": audience}
-            for audience in ("native", "assigned")
-            if audience == "native" or admin_ids
-            for action in ("approve", "decline")
-        }
-        pending_key = self.storage.reserve_pending(stored)
+        admin_ids = []
+        pending_key = ""
+        if not auto_approved:
+            admin_ids = self._callback_admin_ids(platform_id, group_openid)
+            stored["review_callbacks"] = {
+                secrets.token_hex(16): {"action": action, "audience": audience}
+                for audience in ("native", "assigned")
+                if audience == "native" or admin_ids
+                for action in ("approve", "decline")
+            }
+            pending_key = self.storage.reserve_pending(stored)
         content = format_request(item, markdown=True)
-        review_enabled = self._feature_setting(
+        review_enabled = not auto_approved and self._feature_setting(
             "enable_join_reply_review",
             group_umo,
         )
@@ -855,26 +881,32 @@ class QQGroupAdminPlugin(Star):
                 result = await api.send_group_text(group_openid, fallback)
             message_id = self._response_id(result)
             ref_idx = str(qq_field(qq_field(result, "ext_info"), "ref_idx") or "")
-            if message_id or ref_idx:
+            if pending_key and (message_id or ref_idx):
                 pending_key = self.storage.bind_pending_message(
                     pending_key,
                     message_id,
                     ref_idx,
                 )
         except Exception:
-            self.storage.remove_pending(pending_key)
+            if pending_key:
+                self.storage.remove_pending(pending_key)
             logger.exception("[%s] 转发入群申请失败", PLUGIN_NAME)
 
     async def _auto_review_join_request(
         self, platform_id: str, client: Any, item: dict[str, Any]
     ) -> bool:
         group_umo = self._group_umo(platform_id, str(item.get("group_openid") or ""))
-        approve = join_keyword_decision(
-            item,
-            self._group_setting("join_whitelist_words", group_umo, []),
-            self._group_setting("join_blacklist_words", group_umo, []),
-            self._group_setting("join_keyword_priority", group_umo, "黑词优先"),
-        )
+        try:
+            approve = join_keyword_decision(
+                item,
+                self._group_setting("join_whitelist_words", group_umo, []),
+                self._group_setting("join_blacklist_words", group_umo, []),
+                self._group_setting("join_keyword_priority", group_umo, "黑词优先"),
+                self._group_setting("join_keyword_match_mode", group_umo, "包含匹配"),
+            )
+        except (ValueError, TimeoutError):
+            logger.exception("[%s] 入群正则无效或匹配超时，转交人工审批", PLUGIN_NAME)
+            return False
         if approve is None:
             return False
         group_id = str(item.get("group_openid") or "")
@@ -896,14 +928,20 @@ class QQGroupAdminPlugin(Star):
                     "[%s] 入群关键词审批失败，保留人工审批流程", PLUGIN_NAME
                 )
                 return False
-            try:
-                self.storage.remove_reviewed_request(*request_key)
-            except Exception:
-                # QQ has already accepted the decision; do not send another review card.
-                logger.exception("[%s] 自动审批成功，但清理待审记录失败", PLUGIN_NAME)
+            self._record_reviewed_request(*request_key)
             return True
         finally:
             self._reviews_inflight.discard(request_key)
+
+    def _record_reviewed_request(
+        self, platform_id: str, group_openid: str, join_request_id: str
+    ) -> None:
+        try:
+            self.storage.remove_reviewed_request(
+                platform_id, group_openid, join_request_id
+            )
+        except Exception:
+            logger.exception("[%s] 审批已完成，但保存完成记录失败", PLUGIN_NAME)
 
     def _callback_admin_ids(self, platform_id: str, group_openid: str) -> list[str]:
         config = self.context.get_config(self._group_umo(platform_id, group_openid))
@@ -1049,7 +1087,7 @@ class QQGroupAdminPlugin(Star):
                 logger.exception("[%s] 按钮审批入群申请失败", PLUGIN_NAME)
                 result = "入群申请审批失败，请查看机器人日志并核实申请状态。"
             else:
-                self.storage.remove_reviewed_request(*request_key)
+                self._record_reviewed_request(*request_key)
                 result = (
                     "已同意入群申请。" if action == "approve" else "已拒绝入群申请。"
                 )
@@ -1070,9 +1108,13 @@ class QQGroupAdminPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def keyword_mute(self, event: AstrMessageEvent) -> None:
-        if not self._is_qq_group(event) or not self._event_feature_setting(
-            event, "enable_keyword_mute", False
-        ):
+        if not self._is_qq_group(event):
+            return
+        mute_enabled = self._event_feature_setting(event, "enable_keyword_mute", False)
+        recall_enabled = self._event_feature_setting(
+            event, "enable_keyword_recall", False
+        )
+        if not mute_enabled and not recall_enabled:
             return
         sender = event.get_sender_id()
         if not sender or sender == event.get_self_id():
@@ -1090,8 +1132,38 @@ class QQGroupAdminPlugin(Star):
             return
         if not await self._sdk_group_enabled(self._event_group_umo(event)):
             return
+        quote = review_quote(event)
+        if (
+            quote
+            and self._can_manage(event)
+            and self._event_feature_setting(event, "enable_join_reply_review")
+            and self._review_action_match(event) is not None
+            and self.storage.find_pending_by_quote(
+                quote, event.get_platform_id(), event.get_group_id()
+            )
+            is not None
+        ):
+            # Only a real, authorized review takes precedence over the word filter.
+            await self.reply_review(event)
+            return
         # Consume matched messages even if QQ rejects the mute, keeping commands/LLM silent.
         event.stop_event()
+        if recall_enabled:
+            try:
+                # Never use a quoted message ID or a session's last message ID.
+                message_id = getattr(event.message_obj, "message_id", "")
+                if not message_id:
+                    raise ValueError("当前消息缺少消息 ID，无法撤回")
+                await asyncio.wait_for(
+                    QQGroupManageAPI(self._platform(event).client).recall_group_message(
+                        event.get_group_id(), str(message_id)
+                    ),
+                    timeout=10,
+                )
+            except Exception:
+                logger.exception("[%s] 违禁词消息撤回失败", PLUGIN_NAME)
+        if not mute_enabled:
+            return
         try:
             seconds = parse_duration(
                 str(self._event_setting(event, "keyword_mute_duration", "10分"))
@@ -1103,18 +1175,9 @@ class QQGroupAdminPlugin(Star):
         except Exception:
             logger.exception("[%s] 违禁词自动禁言失败", PLUGIN_NAME)
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
-    async def reply_review(self, event: AstrMessageEvent) -> None:
-        if not self._is_qq_group(event) or not self._event_feature_setting(
-            event,
-            "enable_join_reply_review",
-        ):
-            return
+    def _review_action_match(self, event: AstrMessageEvent) -> re.Match | None:
         action_text = review_action_text(event)
         action_match = ACTION_RE.fullmatch(action_text)
-        quote = review_quote(event)
-        if quote is None:
-            return
         if action_match is None:
             config = self.context.get_config(self._event_group_umo(event))
             for prefix in config.get("wake_prefix", []):
@@ -1123,6 +1186,19 @@ class QQGroupAdminPlugin(Star):
                         action_text[len(prefix) :].strip()
                     )
                     break
+        return action_match
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
+    async def reply_review(self, event: AstrMessageEvent) -> None:
+        if not self._is_qq_group(event) or not self._event_feature_setting(
+            event,
+            "enable_join_reply_review",
+        ):
+            return
+        quote = review_quote(event)
+        if quote is None:
+            return
+        action_match = self._review_action_match(event)
         if action_match is None:
             return
         try:
@@ -1252,9 +1328,16 @@ class QQGroupAdminPlugin(Star):
         if not targets:
             yield event.plain_result("请艾特要添加的群管。")
             return
-        added = sum(
-            self.storage.add_group_admin(event.get_group_id(), item) for item in targets
-        )
+        try:
+            added = self.storage.update_group_admins(
+                event.get_group_id(), targets, add=True
+            )
+        except OSError:
+            logger.exception("[%s] 保存群管名单失败", PLUGIN_NAME)
+            yield event.plain_result(
+                "群管名单保存失败，本次修改未生效，请检查存储权限和磁盘空间。"
+            )
+            return
         yield event.plain_result(f"已添加 {added} 名本群群管。")
 
     @filter.command("删除群管", alias={"移除群管"})
@@ -1273,10 +1356,16 @@ class QQGroupAdminPlugin(Star):
         if not targets:
             yield event.plain_result("请艾特要删除的群管。")
             return
-        removed = sum(
-            self.storage.remove_group_admin(event.get_group_id(), item)
-            for item in targets
-        )
+        try:
+            removed = self.storage.update_group_admins(
+                event.get_group_id(), targets, add=False
+            )
+        except OSError:
+            logger.exception("[%s] 保存群管名单失败", PLUGIN_NAME)
+            yield event.plain_result(
+                "群管名单保存失败，本次修改未生效，请检查存储权限和磁盘空间。"
+            )
+            return
         yield event.plain_result(f"已删除 {removed} 名本群群管。")
 
     @filter.command("群管列表")
@@ -1401,6 +1490,9 @@ class QQGroupAdminPlugin(Star):
                     "join_keyword_priority": self._event_setting(
                         event, "join_keyword_priority", "黑词优先"
                     ),
+                    "join_keyword_match_mode": self._event_setting(
+                        event, "join_keyword_match_mode", "包含匹配"
+                    ),
                     "keyword_mute_duration": self._event_setting(
                         event, "keyword_mute_duration", "10分"
                     ),
@@ -1420,11 +1512,13 @@ class QQGroupAdminPlugin(Star):
         self, event: AstrMessageEvent, name: str, action: str, value: str
     ) -> str:
         value = value.strip()
+        mode = self._event_setting(event, "join_keyword_match_mode", "包含匹配")
         if name in WORD_LISTS:
             key = WORD_LISTS[name]
+            regex_mode = key in JOIN_REGEX_KEYS and mode == "正则匹配"
             words = list(self._event_setting(event, key, []))
             if action in {"", "查看"}:
-                return word_page(name, words, int(value or "1"))
+                return word_page(name, words, int(value or "1"), mode)
             if action == "清空":
                 if value != "确认":
                     raise ValueError(f"清空需发送：群管功能 {name} 清空 确认")
@@ -1432,16 +1526,18 @@ class QQGroupAdminPlugin(Star):
             elif action in {"添加", "删除"}:
                 if not value:
                     raise ValueError(f"用法：群管功能 {name} {action} 词条")
-                normalized = [word.strip().casefold() for word in words]
+                # Regex escapes are case-sensitive: \D and \d must remain distinct.
+                normalize = str.strip if regex_mode else lambda s: s.strip().casefold()
+                normalized = [normalize(word) for word in words]
                 if action == "添加":
-                    if value.casefold() in normalized:
+                    if regex_mode:
+                        compile_join_pattern(value)
+                    if normalize(value) in normalized:
                         return "该词条已存在。"
                     words.append(value)
-                elif value.casefold() in normalized:
+                elif normalize(value) in normalized:
                     words = [
-                        word
-                        for word in words
-                        if word.strip().casefold() != value.casefold()
+                        word for word in words if normalize(word) != normalize(value)
                     ]
                 else:
                     raise ValueError("词条不存在，请先查看列表")
@@ -1451,12 +1547,25 @@ class QQGroupAdminPlugin(Star):
             return f"{name}已保存，当前 {len(words)} 条。"
         key = KEYWORD_VALUES[name]
         if action in {"", "查看"}:
-            return f"{name}：{self._event_setting(event, key)}"
+            current = (
+                mode
+                if key == "join_keyword_match_mode"
+                else self._event_setting(event, key)
+            )
+            return f"{name}：{current}"
         if action != "设置":
             raise ValueError(f"用法：群管功能 {name} 设置 内容")
         if key == "join_keyword_priority":
             if value not in {"白词优先", "黑词优先"}:
                 raise ValueError("请选择 白词优先 或 黑词优先")
+        elif key == "join_keyword_match_mode":
+            if value not in {"包含匹配", "正则匹配"}:
+                raise ValueError("请选择 包含匹配 或 正则匹配")
+            if value == "正则匹配":
+                for word_key in JOIN_REGEX_KEYS:
+                    for word in self._event_setting(event, word_key, []):
+                        if word.strip():
+                            compile_join_pattern(word.strip())
         else:
             seconds = parse_duration(value)
             self._validate_duration(seconds, self._event_group_umo(event))
@@ -1710,6 +1819,8 @@ class QQGroupAdminPlugin(Star):
         reason: str,
     ) -> Any:
         request_key = (event.get_platform_id(), group_openid, join_request_id)
+        if self.storage.is_reviewed(*request_key):
+            raise ValueError("该入群申请已处理，请勿重复审批。")
         if request_key in self._reviews_inflight:
             raise ValueError("该入群申请正在处理中，请勿重复审批。")
         self._reviews_inflight.add(request_key)
@@ -1723,7 +1834,7 @@ class QQGroupAdminPlugin(Star):
                 approve=approve,
                 reject_reason=reason,
             )
-            self.storage.remove_reviewed_request(*request_key)
+            self._record_reviewed_request(*request_key)
             return result
         finally:
             self._reviews_inflight.discard(request_key)

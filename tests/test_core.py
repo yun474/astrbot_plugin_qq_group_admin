@@ -410,6 +410,7 @@ class CoreTests(unittest.TestCase):
         )
         plugin.storage = SimpleNamespace(
             reserve_pending=lambda item: stored.append(item) or "reserved-1",
+            is_reviewed=lambda *args: False,
             bind_pending_message=lambda pending_key, message_id, ref_idx="": message_id,
             remove_pending=lambda pending_key: None,
         )

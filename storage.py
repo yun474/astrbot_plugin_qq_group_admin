@@ -17,6 +17,7 @@ class PluginStorage:
             "group_admins": {},
             "group_feature_overrides": {},
             "pending": {},
+            "reviewed": {},
         }
         self.load()
 
@@ -43,9 +44,13 @@ class PluginStorage:
     def _validate(raw: Any) -> None:
         if not isinstance(raw, dict):
             raise ValueError("存储根节点必须是对象")
-        for name in ("group_admins", "group_feature_overrides", "pending"):
+        for name in ("group_admins", "group_feature_overrides", "pending", "reviewed"):
             if not isinstance(raw.get(name, {}), dict):
                 raise ValueError(f"{name} 必须是对象")
+        if any(
+            not isinstance(value, str) for value in raw.get("reviewed", {}).values()
+        ):
+            raise ValueError("已审批记录必须包含时间字符串")
         for admins in raw.get("group_admins", {}).values():
             if not isinstance(admins, list) or any(
                 not isinstance(member, str) for member in admins
@@ -90,22 +95,38 @@ class PluginStorage:
         return [str(item) for item in admins]
 
     def add_group_admin(self, group_openid: str, member_openid: str) -> bool:
-        admins = self.group_admins(group_openid)
-        if member_openid in admins:
-            return False
-        admins.append(member_openid)
-        self.data["group_admins"][group_openid] = admins
-        self.save()
-        return True
+        return bool(self.update_group_admins(group_openid, [member_openid], add=True))
 
     def remove_group_admin(self, group_openid: str, member_openid: str) -> bool:
+        return bool(self.update_group_admins(group_openid, [member_openid], add=False))
+
+    def update_group_admins(
+        self, group_openid: str, members: list[str], *, add: bool
+    ) -> int:
+        """Commit a whole command together; failed writes cannot change permissions."""
+        groups = self.data["group_admins"]
+        previous = groups.get(group_openid)
         admins = self.group_admins(group_openid)
-        if member_openid not in admins:
-            return False
-        admins.remove(member_openid)
-        self.data["group_admins"][group_openid] = admins
-        self.save()
-        return True
+        changed = 0
+        for member in members:
+            if add and member not in admins:
+                admins.append(member)
+                changed += 1
+            elif not add and member in admins:
+                admins.remove(member)
+                changed += 1
+        if not changed:
+            return 0
+        groups[group_openid] = admins
+        try:
+            self.save()
+        except Exception:
+            if previous is None:
+                groups.pop(group_openid, None)
+            else:
+                groups[group_openid] = previous
+            raise
+        return changed
 
     def group_feature_override(self, group_umo: str, key: str) -> bool | None:
         overrides = self.data["group_feature_overrides"].get(group_umo, {})
@@ -217,7 +238,9 @@ class PluginStorage:
     def remove_reviewed_request(
         self, platform_id: str, group_openid: str, join_request_id: str
     ) -> None:
-        """Invalidate all notifications/buttons after any approval entry succeeds."""
+        """Keep a completion marker and invalidate every card for the application."""
+        key = json.dumps([platform_id, group_openid, join_request_id])
+        self.data["reviewed"][key] = datetime.now(timezone.utc).isoformat()
         keys = [
             key
             for key, item in self.data["pending"].items()
@@ -225,10 +248,21 @@ class PluginStorage:
             and item.get("group_openid") == group_openid
             and str(item.get("join_request_id")) == join_request_id
         ]
-        if keys:
-            for key in keys:
-                del self.data["pending"][key]
-            self.save()
+        for key in keys:
+            del self.data["pending"][key]
+        self.prune(save=False)
+        # Keep the live completion marker even if persistence fails: QQ has
+        # already executed the operation, so a retry must not execute it again.
+        self.save()
+
+    def is_reviewed(
+        self, platform_id: str, group_openid: str, join_request_id: str
+    ) -> bool:
+        self.prune(save=False)
+        return (
+            json.dumps([platform_id, group_openid, join_request_id])
+            in self.data["reviewed"]
+        )
 
     def remove_pending(self, notification_message_id: str) -> None:
         if self.data["pending"].pop(notification_message_id, None) is not None:
@@ -237,15 +271,17 @@ class PluginStorage:
     def prune(self, *, save: bool = True) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         removed = False
-        for message_id, item in list(self.data["pending"].items()):
-            try:
-                stored_at = datetime.fromisoformat(str(item.get("stored_at", "")))
-                if stored_at.tzinfo is None:
-                    stored_at = stored_at.replace(tzinfo=timezone.utc)
-            except (TypeError, ValueError):
-                stored_at = datetime.min.replace(tzinfo=timezone.utc)
-            if stored_at < cutoff:
-                del self.data["pending"][message_id]
-                removed = True
+        for section in ("pending", "reviewed"):
+            for key, item in list(self.data[section].items()):
+                timestamp = item.get("stored_at", "") if section == "pending" else item
+                try:
+                    stored_at = datetime.fromisoformat(str(timestamp))
+                    if stored_at.tzinfo is None:
+                        stored_at = stored_at.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    stored_at = datetime.min.replace(tzinfo=timezone.utc)
+                if stored_at < cutoff:
+                    del self.data[section][key]
+                    removed = True
         if removed and save:
             self.save()

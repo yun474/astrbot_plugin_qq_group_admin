@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +9,53 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 
 class StorageRecoveryTests(unittest.TestCase):
+    def test_failed_admin_batch_leaves_live_and_persisted_permissions_unchanged(self):
+        for add in (False, True):
+            for existing_group in (False, True):
+                with (
+                    self.subTest(add=add, existing_group=existing_group),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    path = Path(directory) / "state.json"
+                    storage = PluginStorage(path)
+                    if existing_group:
+                        storage.update_group_admins("g", ["a", "b"], add=True)
+                    storage.save()
+                    before = json.loads(path.read_text(encoding="utf-8"))
+                    with patch.object(
+                        Path, "replace", side_effect=OSError("disk full")
+                    ):
+                        if add or existing_group:
+                            with self.assertRaises(OSError):
+                                storage.update_group_admins(
+                                    "g", ["a", "b", "c"], add=add
+                                )
+                        else:
+                            self.assertEqual(
+                                storage.update_group_admins("g", ["a"], add=False), 0
+                            )
+                    self.assertEqual(storage.data, before)
+                    self.assertEqual(PluginStorage(path).data, before)
+
+    def test_completed_markers_are_scoped_persisted_and_expire(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            storage = PluginStorage(path, retention_days=30)
+            item = {"platform_id": "p", "group_openid": "g", "join_request_id": "r"}
+            storage.put_pending("notice", item)
+            storage.put_pending("duplicate", item)
+            storage.remove_reviewed_request("p", "g", "r")
+            reloaded = PluginStorage(path)
+            self.assertEqual(reloaded.data["pending"], {})
+            self.assertTrue(reloaded.is_reviewed("p", "g", "r"))
+            for key in (("other", "g", "r"), ("p", "other", "r"), ("p", "g", "new")):
+                self.assertFalse(reloaded.is_reviewed(*key))
+            reloaded.data["reviewed"][json.dumps(["p", "g", "r"])] = (
+                datetime.now(timezone.utc) - timedelta(days=31)
+            ).isoformat()
+            reloaded.prune()
+            self.assertFalse(PluginStorage(path).is_reviewed("p", "g", "r"))
+
     def test_corrupt_files_are_preserved_before_new_writes(self):
         for content in (
             b'{"group_admins":',

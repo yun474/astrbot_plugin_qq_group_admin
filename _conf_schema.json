@@ -208,13 +208,26 @@
           "keyword_settings": {
             "description": "⑧ 关键词管理",
             "type": "object",
-            "hint": "按包含关系匹配，忽略大小写和词条首尾空白；空词条不生效。",
+            "hint": "默认包含匹配：回答或消息含有所填词条即命中，忽略大小写。进群白黑词可选正则匹配。",
             "items": {
               "enable_join_keyword_review": {
                 "description": "启用入群关键词自动审批",
                 "type": "bool",
                 "default": false,
                 "hint": "只检查入群问题的回答，不检查问题、昵称或验证消息。命中白词同意、黑词拒绝；未命中继续人工审批。独立于申请通知和人工审批开关。"
+              },
+              "join_keyword_match_mode": {
+                "description": "进群匹配模式",
+                "type": "string",
+                "options": [
+                  "包含匹配",
+                  "正则匹配"
+                ],
+                "default": "包含匹配",
+                "hint": "默认只需填写词语，回答中包含该词即命中。仅正则匹配模式需要填写表达式；切换模式不会修改词表，请检查现有词条含义。",
+                "condition": {
+                  "enable_join_keyword_review": true
+                }
               },
               "join_whitelist_words": {
                 "description": "进群白词",
@@ -223,7 +236,7 @@
                   "type": "string"
                 },
                 "default": [],
-                "hint": "任一回答包含任一白词时自动同意；留空不自动同意。",
+                "hint": "每条填写一个词，任一回答包含该词即自动同意，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。",
                 "condition": {
                   "enable_join_keyword_review": true
                 }
@@ -235,7 +248,7 @@
                   "type": "string"
                 },
                 "default": [],
-                "hint": "任一回答包含任一黑词时自动拒绝；留空不自动拒绝。",
+                "hint": "每条填写一个词，任一回答包含该词即自动拒绝，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。",
                 "condition": {
                   "enable_join_keyword_review": true
                 }
@@ -259,6 +272,12 @@
                 "default": false,
                 "hint": "检查机器人实际收到的 QQ 群消息正文，命中后禁言发送者并停止后续指令和 LLM 处理。成功、失败均不向群里提示，失败仅记日志；不检查引用原文、图片或语音。"
               },
+              "enable_keyword_recall": {
+                "description": "启用违禁词消息撤回",
+                "type": "bool",
+                "default": false,
+                "hint": "与禁言独立，可单独开启或同时执行，复用消息违禁词表。机器人需为群管理员，仅可撤回普通成员 2 分钟内的消息；直接使用当前事件的消息 ID，不保存聊天记录。成功、失败均不向群里提示，失败仅记日志。"
+              },
               "mute_keywords": {
                 "description": "消息违禁词",
                 "type": "list",
@@ -266,10 +285,7 @@
                   "type": "string"
                 },
                 "default": [],
-                "hint": "消息正文包含任一词条即触发，留空不处理。",
-                "condition": {
-                  "enable_keyword_mute": true
-                }
+                "hint": "消息正文包含任一词条即触发已开启的禁言或撤回，留空不处理；这是普通文本词表，不使用正则。"
               },
               "keyword_mute_duration": {
                 "description": "违禁词禁言时长",
@@ -499,13 +515,26 @@
               "keyword_settings": {
                 "description": "⑧ 关键词管理",
                 "type": "object",
-                "hint": "按包含关系匹配，忽略大小写和词条首尾空白；空词条不生效。",
+                "hint": "默认包含匹配：回答或消息含有所填词条即命中，忽略大小写。进群白黑词可选正则匹配。",
                 "items": {
                   "enable_join_keyword_review": {
                     "description": "启用入群关键词自动审批",
                     "type": "bool",
                     "default": false,
                     "hint": "只检查入群问题的回答，不检查问题、昵称或验证消息。命中白词同意、黑词拒绝；未命中继续人工审批。独立于申请通知和人工审批开关。"
+                  },
+                  "join_keyword_match_mode": {
+                    "description": "进群匹配模式",
+                    "type": "string",
+                    "options": [
+                      "包含匹配",
+                      "正则匹配"
+                    ],
+                    "default": "包含匹配",
+                    "hint": "默认只需填写词语，回答中包含该词即命中。仅正则匹配模式需要填写表达式；切换模式不会修改词表，请检查现有词条含义。",
+                    "condition": {
+                      "enable_join_keyword_review": true
+                    }
                   },
                   "join_whitelist_words": {
                     "description": "进群白词",
@@ -514,7 +543,7 @@
                       "type": "string"
                     },
                     "default": [],
-                    "hint": "任一回答包含任一白词时自动同意；留空不自动同意。",
+                    "hint": "每条填写一个词，任一回答包含该词即自动同意，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。",
                     "condition": {
                       "keyword_settings.enable_join_keyword_review": true
                     }
@@ -526,7 +555,7 @@
                       "type": "string"
                     },
                     "default": [],
-                    "hint": "任一回答包含任一黑词时自动拒绝；留空不自动拒绝。",
+                    "hint": "每条填写一个词，任一回答包含该词即自动拒绝，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。",
                     "condition": {
                       "keyword_settings.enable_join_keyword_review": true
                     }
@@ -550,6 +579,12 @@
                     "default": false,
                     "hint": "检查机器人实际收到的 QQ 群消息正文，命中后禁言发送者并停止后续指令和 LLM 处理。成功、失败均不向群里提示，失败仅记日志；不检查引用原文、图片或语音。"
                   },
+                  "enable_keyword_recall": {
+                    "description": "启用违禁词消息撤回",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "与禁言独立，可单独开启或同时执行，复用消息违禁词表。机器人需为群管理员，仅可撤回普通成员 2 分钟内的消息；直接使用当前事件的消息 ID，不保存聊天记录。成功、失败均不向群里提示，失败仅记日志。"
+                  },
                   "mute_keywords": {
                     "description": "消息违禁词",
                     "type": "list",
@@ -557,10 +592,7 @@
                       "type": "string"
                     },
                     "default": [],
-                    "hint": "消息正文包含任一词条即触发，留空不处理。",
-                    "condition": {
-                      "keyword_settings.enable_keyword_mute": true
-                    }
+                    "hint": "消息正文包含任一词条即触发已开启的禁言或撤回，留空不处理；这是普通文本词表，不使用正则。"
                   },
                   "keyword_mute_duration": {
                     "description": "违禁词禁言时长",
@@ -757,13 +789,26 @@
   "keyword_settings": {
     "description": "⑧ 关键词管理",
     "type": "object",
-    "hint": "功能开关可按群覆盖，词表、优先规则和禁言时长由所有群共用。按包含关系匹配，忽略英文字母大小写和词条首尾空白，空词条不生效，不支持正则。",
+    "hint": "默认包含匹配：回答或消息含有所填词条即命中，忽略大小写。进群白黑词可选正则匹配。",
     "items": {
       "enable_join_keyword_review": {
         "description": "启用入群关键词自动审批",
         "type": "bool",
         "default": false,
         "hint": "只检查入群问题的回答，不检查问题、昵称或验证消息。命中白词同意、黑词拒绝；未命中继续人工审批。独立于申请通知和人工审批开关。"
+      },
+      "join_keyword_match_mode": {
+        "description": "进群匹配模式",
+        "type": "string",
+        "options": [
+          "包含匹配",
+          "正则匹配"
+        ],
+        "default": "包含匹配",
+        "hint": "默认只需填写词语，回答中包含该词即命中。仅正则匹配模式需要填写表达式；切换模式不会修改词表，请检查现有词条含义。",
+        "condition": {
+          "enable_join_keyword_review": true
+        }
       },
       "join_whitelist_words": {
         "description": "进群白词",
@@ -772,7 +817,7 @@
           "type": "string"
         },
         "default": [],
-        "hint": "任一回答包含任一白词时自动同意；留空不自动同意。"
+        "hint": "每条填写一个词，任一回答包含该词即自动同意，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。"
       },
       "join_blacklist_words": {
         "description": "进群黑词",
@@ -781,7 +826,7 @@
           "type": "string"
         },
         "default": [],
-        "hint": "任一回答包含任一黑词时自动拒绝；留空不自动拒绝。"
+        "hint": "每条填写一个词，任一回答包含该词即自动拒绝，默认忽略大小写，留空不匹配。选择正则匹配后才按表达式处理；无效或超时则停止本次自动审批。"
       },
       "join_keyword_priority": {
         "description": "同时命中白词和黑词时的优先规则",
@@ -799,6 +844,12 @@
         "default": false,
         "hint": "检查机器人实际收到的 QQ 群消息正文，命中后禁言发送者并停止后续指令和 LLM 处理。成功、失败均不向群里提示，失败仅记日志；不检查引用原文、图片或语音。"
       },
+      "enable_keyword_recall": {
+        "description": "启用违禁词消息撤回",
+        "type": "bool",
+        "default": false,
+        "hint": "与禁言独立，可单独开启或同时执行，复用消息违禁词表。机器人需为群管理员，仅可撤回普通成员 2 分钟内的消息；直接使用当前事件的消息 ID，不保存聊天记录。成功、失败均不向群里提示，失败仅记日志。"
+      },
       "mute_keywords": {
         "description": "消息违禁词",
         "type": "list",
@@ -806,7 +857,7 @@
           "type": "string"
         },
         "default": [],
-        "hint": "消息正文包含任一词条即触发，留空不处理。"
+        "hint": "消息正文包含任一词条即触发已开启的禁言或撤回，留空不处理；这是普通文本词表，不使用正则。"
       },
       "keyword_mute_duration": {
         "description": "违禁词禁言时长",

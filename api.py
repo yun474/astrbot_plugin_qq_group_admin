@@ -59,6 +59,13 @@ class QQGroupManageAPI:
             f"/v2/groups/{group_id}/restrict_chat_setting",
         )
 
+    async def recall_group_message(self, group_openid: str, message_id: str) -> Any:
+        """Recall the current event's message; QQ enforces role and two-minute limit."""
+        return await self._request(
+            "DELETE",
+            f"/v2/groups/{quote(group_openid, safe='')}/messages/{quote(message_id, safe='')}",
+        )
+
     async def get_group_member_info(self, group_openid: str, member_openid: str) -> Any:
         group_id = quote(group_openid, safe="")
         member_id = quote(member_openid, safe="")

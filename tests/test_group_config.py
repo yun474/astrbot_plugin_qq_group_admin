@@ -334,6 +334,58 @@ class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("上一页", page)
         self.assertIn("下一页", page)
 
+    def test_old_join_words_remain_literal_after_migration_and_reload(self):
+        words = [" a.b ", "C++", "[广告]", r"\d+", ""]
+        self.config["keyword_settings"]["join_whitelist_words"] = words.copy()
+        self.storage.set_group_feature_override(
+            "p:GroupMessage:g", "enable_join_keyword_review", True
+        )
+        self.migrate()
+        reloaded = AstrBotConfig(str(self.path), schema=SCHEMA)
+        store = GroupConfig(reloaded)
+        for profile in (
+            store.data["global_settings"],
+            store.profile("p:GroupMessage:g"),
+        ):
+            self.assertEqual(profile["keyword_settings"]["join_whitelist_words"], words)
+            self.assertEqual(
+                profile["keyword_settings"]["join_keyword_match_mode"], "包含匹配"
+            )
+
+    async def test_group_match_mode_is_saved_and_does_not_change_other_groups(self):
+        self.migrate()
+        await self.command(self.event(), "进群匹配模式", "设置", "正则匹配")
+        reloaded = AstrBotConfig(str(self.path), schema=SCHEMA)
+        self.plugin.config = reloaded
+        self.assertEqual(
+            self.plugin._event_setting(self.event(), "join_keyword_match_mode"),
+            "正则匹配",
+        )
+        self.assertEqual(
+            self.plugin._event_setting(
+                self.event(group="other"), "join_keyword_match_mode"
+            ),
+            "包含匹配",
+        )
+        self.assertEqual(
+            GroupConfig(reloaded).profile("p:GroupMessage:g")["keyword_settings"][
+                "join_whitelist_words"
+            ],
+            ["old white"],
+        )
+
+    async def test_group_recall_switch_is_saved_independently(self):
+        self.migrate()
+        await self.command(self.event(), "违禁词撤回", "开启")
+        reloaded = AstrBotConfig(str(self.path), schema=SCHEMA)
+        profile = GroupConfig(reloaded).profile("p:GroupMessage:g")
+        self.assertTrue(profile["keyword_settings"]["enable_keyword_recall"])
+        self.assertFalse(
+            self.plugin._event_feature_setting(
+                self.event("other"), "enable_keyword_recall", False
+            )
+        )
+
     def test_dashboard_validator_accepts_migrated_and_chat_written_profiles(self):
         from astrbot.dashboard.services.config_service import validate_config
 

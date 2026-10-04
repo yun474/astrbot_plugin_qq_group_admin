@@ -140,6 +140,138 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         )
         self.api.send_group_markdown.assert_not_awaited()
 
+    async def test_completed_requests_are_not_reopened_after_replay_or_reload(self):
+        item = self.application("同好")
+        await self.plugin._handle_join_request_event("p", item)
+        await self.plugin._handle_join_request_event("p", item)
+        self.plugin.storage = PluginStorage(self.plugin.storage.path)
+        await self.plugin._handle_join_request_event("p", item)
+        self.api.review_join_request.assert_awaited_once()
+        self.api.send_group_markdown.assert_not_awaited()
+        self.assertEqual(self.plugin.storage.data["pending"], {})
+
+    async def test_manual_completion_blocks_automatic_replay_and_tool_retry(self):
+        await self.plugin._review(self.event(), "g", "applicant", "request", False, "")
+        self.plugin.storage = PluginStorage(self.plugin.storage.path)
+        await self.plugin._handle_join_request_event("p", self.application("同好"))
+        with self.assertRaisesRegex(ValueError, "已处理"):
+            await self.plugin._review(
+                self.event(), "g", "applicant", "request", True, ""
+            )
+        self.api.review_join_request.assert_awaited_once()
+        self.api.send_group_markdown.assert_not_awaited()
+
+    async def test_admin_command_reports_disk_failure_without_changing_permissions(
+        self,
+    ):
+        self.plugin._mentioned_members = lambda event: ["a", "b"]
+        event = self.event()
+        event.role = "admin"
+        for add in (True, False):
+            with self.subTest(add=add):
+                if not add:
+                    self.plugin.storage.update_group_admins("g", ["a", "b"], add=True)
+                command = (
+                    self.plugin.add_group_admin
+                    if add
+                    else self.plugin.remove_group_admin
+                )
+                before = self.plugin.storage.group_admins("g")
+                with patch.object(
+                    self.plugin.storage, "save", side_effect=OSError("disk full")
+                ):
+                    results = [result async for result in command(event)]
+                self.assertEqual(self.plugin.storage.group_admins("g"), before)
+                self.assertIn("本次修改未生效", results[0].chain[0].text)
+
+    async def test_qq_auto_approval_invalidates_cards_and_sends_only_information(self):
+        item = dict(self.application("同好"), auto_approved={"strategy_id": "qq"})
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                item["join_request_id"] = f"auto-{fallback}"
+                self.plugin.storage.put_pending("old", dict(item, platform_id="p"))
+                self.api.send_group_markdown.side_effect = (
+                    RuntimeError("markdown failed") if fallback else None
+                )
+                await self.plugin._handle_join_request_event("p", item)
+                sender = (
+                    self.api.send_group_text
+                    if fallback
+                    else self.api.send_group_markdown
+                )
+                call = sender.await_args
+                self.assertIn("已自动通过", call.args[1])
+                self.assertNotIn("引用", call.args[1])
+                self.assertIsNone(call.kwargs.get("keyboard"))
+                self.assertEqual(self.plugin.storage.data["pending"], {})
+                self.assertTrue(
+                    self.plugin.storage.is_reviewed("p", "g", item["join_request_id"])
+                )
+        self.api.review_join_request.assert_not_awaited()
+
+    async def test_auto_approval_cleans_old_cards_even_with_notifications_disabled(
+        self,
+    ):
+        self.plugin.config["enable_join_notice"] = False
+        self.settings["enable_join_keyword_review"] = False
+        item = dict(self.application("同好"), auto_approved={"strategy_id": "qq"})
+        self.plugin.storage.put_pending("old", dict(item, platform_id="p"))
+        await self.plugin._handle_join_request_event("p", item)
+        self.assertEqual(self.plugin.storage.data["pending"], {})
+        self.api.send_group_markdown.assert_not_awaited()
+
+    async def test_completed_operation_remains_live_when_completion_write_fails(self):
+        with patch.object(
+            self.plugin.storage, "save", side_effect=OSError("disk full")
+        ):
+            await self.plugin._handle_join_request_event("p", self.application("同好"))
+            await self.plugin._handle_join_request_event("p", self.application("同好"))
+        self.api.review_join_request.assert_awaited_once()
+        self.api.send_group_markdown.assert_not_awaited()
+
+    async def test_only_authorized_real_review_precedes_keyword_mute(self):
+        self.settings["mute_keywords"] = ["广告"]
+        self.plugin.context.get_config.return_value["wake_prefix"] = ["!"]
+        cases = (
+            ("admin", "g", "notice", True, "拒绝 广告", True),
+            ("admin", "g", "notice", True, "!拒绝 广告", True),
+            ("member", "g", "notice", True, "拒绝 广告", False),
+            ("admin", "other", "notice", True, "拒绝 广告", False),
+            ("admin", "g", "missing", True, "拒绝 广告", False),
+            ("admin", "g", "notice", False, "拒绝 广告", False),
+            ("admin", "g", "notice", True, "普通广告", False),
+        )
+        for index, (role, group, quoted, enabled, text, allowed) in enumerate(cases):
+            with self.subTest(index=index):
+                self.plugin.storage.put_pending(
+                    "notice",
+                    dict(
+                        self.application("广告"),
+                        platform_id="p",
+                        join_request_id=f"r-{index}",
+                    ),
+                )
+                self.plugin.config["enable_join_reply_review"] = enabled
+                event = self.event(text, group=group)
+                event.role = role
+                event.message_obj.message.insert(0, Reply(id=quoted))
+                self.api.review_join_request.reset_mock()
+                self.api.mute_member.reset_mock()
+                await self.plugin.keyword_mute(event)
+                self.assertTrue(event.is_stopped())
+                if allowed:
+                    self.api.mute_member.assert_not_awaited()
+                    self.api.review_join_request.assert_awaited_once_with(
+                        "g",
+                        "applicant",
+                        f"r-{index}",
+                        approve=False,
+                        reject_reason="广告",
+                    )
+                else:
+                    self.api.mute_member.assert_awaited_once()
+                    self.api.review_join_request.assert_not_awaited()
+
     async def test_failure_falls_back_to_manual_notice_and_releases_lock(self):
         self.api.review_join_request.side_effect = RuntimeError("QQ rejected")
         await self.plugin._handle_join_request_event("p", self.application("同好"))
