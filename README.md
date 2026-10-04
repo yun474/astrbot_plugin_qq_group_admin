@@ -8,7 +8,7 @@
 
 ✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 · WebSocket / Webhook ✨
 
-[![版本 2.7.0](https://img.shields.io/badge/版本-2.7.0-89b4fa.svg)](CHANGELOG.md)
+[![版本 2.7.3](https://img.shields.io/badge/版本-2.7.3-89b4fa.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-a3be8c.svg)](LICENSE)
 [![作者 yun474](https://img.shields.io/badge/作者-yun474-f5b7c7.svg)](https://github.com/yun474)
 
