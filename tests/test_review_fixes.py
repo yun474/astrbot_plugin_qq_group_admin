@@ -20,7 +20,11 @@ class ReviewFixTests(unittest.IsolatedAsyncioTestCase):
         for prefix in ("/", "!", "云云 "):
             config = {"wake_prefix": [prefix], "platform_settings": {}, "admins_id": []}
             stage = WakingCheckStage()
-            await stage.initialize(SimpleNamespace(astrbot_config=config))
+            await stage.initialize(
+                SimpleNamespace(
+                    astrbot_config=config, db_helper=None, astrbot_config_id="test"
+                )
+            )
             for text, expected in (
                 ("群管功能", True),
                 (prefix + "群管功能", True),

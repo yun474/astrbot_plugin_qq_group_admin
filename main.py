@@ -14,6 +14,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.session_plugin_manager import SessionPluginManager
+from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
@@ -1038,9 +1039,9 @@ class QQGroupAdminPlugin(Star):
             await acknowledge(4)
             return True
         umo = self._group_umo(platform_id, group)
-        if not await self._sdk_group_enabled(umo) or not self._feature_setting(
-            "enable_join_reply_review", umo
-        ):
+        if not await self._sdk_group_enabled(
+            umo, actor_id=sender
+        ) or not self._feature_setting("enable_join_reply_review", umo):
             await acknowledge(4)
             return True
         assigned_admin = sender in self._callback_admin_ids(platform_id, group)
@@ -2045,16 +2046,41 @@ class QQGroupAdminPlugin(Star):
         whitelist = {str(item).strip() for item in configured if str(item).strip()}
         return not whitelist or umo in whitelist
 
-    async def _sdk_group_enabled(self, umo: str) -> bool:
+    async def _sdk_group_enabled(self, umo: str, actor_id: str = "") -> bool:
         if not self._umo_enabled(umo):
             return False
         try:
-            plugins = self.context.get_config(umo).get("plugin_set", ["*"])
+            config = self.context.get_config(umo)
+            plugins = config.get("plugin_set", ["*"])
             if plugins != ["*"] and PLUGIN_NAME not in plugins:
                 return False
-            return await SessionPluginManager.is_plugin_enabled_for_session(
-                umo, PLUGIN_NAME
+            # 生命周期检查真实群；按钮回调还需检查点击者的隔离会话。
+            settings = config.get("platform_settings", {})
+            whitelist = {
+                str(value).strip()
+                for value in settings.get("id_whitelist", [])
+                if str(value).strip()
+            }
+            group_id = umo.split(":", 2)[-1]
+            actor_umo = umo
+            if actor_id and settings.get("unique_session", False):
+                actor_umo = f"{umo.rsplit(':', 1)[0]}:{actor_id}_{group_id}"
+            exempt = bool(
+                actor_id
+                and actor_id in config.get("admins_id", [])
+                and settings.get("wl_ignore_admin_on_group", False)
             )
+            if settings.get("enable_id_white_list") and whitelist and not exempt:
+                if actor_umo not in whitelist and group_id not in whitelist:
+                    return False
+            for session in dict.fromkeys((umo, actor_umo)):
+                if not await SessionServiceManager.is_session_enabled(session):
+                    return False
+                if not await SessionPluginManager.is_plugin_enabled_for_session(
+                    session, PLUGIN_NAME
+                ):
+                    return False
+            return True
         except Exception:
             logger.exception("[%s] 无法读取会话插件状态，已拒绝 SDK 事件", PLUGIN_NAME)
             return False
