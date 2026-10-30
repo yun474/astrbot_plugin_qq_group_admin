@@ -17,6 +17,12 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 class KeywordTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        service_patch = patch(
+            "astrbot_plugin_qq_group_admin.main.SessionServiceManager.is_session_enabled",
+            new=AsyncMock(return_value=True),
+        )
+        self.service_enabled = service_patch.start()
+        self.addCleanup(service_patch.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.plugin = object.__new__(QQGroupAdminPlugin)
@@ -53,6 +59,29 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.session_enabled = value
+
+    async def test_sdk_denies_disabled_or_non_whitelisted_group_before_approval(self):
+        for settings, enabled in (
+            ({}, False),
+            ({"enable_id_white_list": True, "id_whitelist": ["other"]}, True),
+        ):
+            with self.subTest(settings=settings, enabled=enabled):
+                self.plugin.context.get_config.return_value["platform_settings"] = (
+                    settings
+                )
+                self.service_enabled.return_value = enabled
+                await self.plugin._handle_join_request_event(
+                    "p", self.application("同好")
+                )
+                self.api.review_join_request.assert_not_awaited()
+                self.api.send_group_markdown.assert_not_awaited()
+        self.service_enabled.return_value = True
+        for whitelist in ([], ["g"], ["p:GroupMessage:g"]):
+            self.plugin.context.get_config.return_value["platform_settings"] = {
+                "enable_id_white_list": True,
+                "id_whitelist": whitelist,
+            }
+            self.assertTrue(await self.plugin._sdk_group_enabled("p:GroupMessage:g"))
 
     @staticmethod
     def application(*answers):
@@ -425,11 +454,13 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
         stage = WakingCheckStage()
         await stage.initialize(
             NS(
+                db_helper=None,
+                astrbot_config_id="test",
                 astrbot_config={
                     "wake_prefix": ["!"],
                     "platform_settings": {},
                     "admins_id": [],
-                }
+                },
             )
         )
         event = self.event()

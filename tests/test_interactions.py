@@ -65,7 +65,43 @@ class Event:
 
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_callback_scope_uses_isolated_session_and_admin_exemption(self):
+        config = {
+            "admins_id": ["astr-admin"],
+            "platform_settings": {"unique_session": True},
+        }
+        self.plugin.context.get_config = lambda umo: config
+        isolated = "p:GroupMessage:user_g"
+        self.service_enabled.side_effect = lambda umo: umo != isolated
+        self.assertFalse(
+            await self.plugin._sdk_group_enabled("p:GroupMessage:g", actor_id="user")
+        )
+        self.service_enabled.side_effect = None
+        self.session_enabled.side_effect = lambda umo, name: umo != isolated
+        self.assertFalse(
+            await self.plugin._sdk_group_enabled("p:GroupMessage:g", actor_id="user")
+        )
+        self.session_enabled.side_effect = None
+        settings = config["platform_settings"]
+        settings.update(enable_id_white_list=True, id_whitelist=[isolated])
+        self.assertTrue(
+            await self.plugin._sdk_group_enabled("p:GroupMessage:g", actor_id="user")
+        )
+        settings.update(id_whitelist=["other"], wl_ignore_admin_on_group=True)
+        self.assertTrue(
+            await self.plugin._sdk_group_enabled(
+                "p:GroupMessage:g", actor_id="astr-admin"
+            )
+        )
+        self.assertFalse(await self.plugin._sdk_group_enabled("p:GroupMessage:g"))
+
     def setUp(self):
+        service_patch = patch(
+            "astrbot_plugin_qq_group_admin.main.SessionServiceManager.is_session_enabled",
+            new=AsyncMock(return_value=True),
+        )
+        self.service_enabled = service_patch.start()
+        self.addCleanup(service_patch.stop)
         session_patcher = patch(
             "astrbot_plugin_qq_group_admin.main.SessionPluginManager.is_plugin_enabled_for_session",
             new=AsyncMock(return_value=True),
@@ -926,6 +962,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             handler_module_path="reply_test",
             handler_name="reply_review",
             handler=self.plugin.reply_review,
+            event_filters=[],
+            event_type=NS(name="AdapterMessageEvent"),
+            extras_configs={},
         )
         for platform in ("qq_official", "qq_official_webhook"):
             for case in (
@@ -993,7 +1032,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                     with patch.dict(
                         "astrbot.core.pipeline.process_stage.method.star_request.star_map",
                         {
-                            "reply_test": NS(name="reply-test"),
+                            "reply_test": NS(
+                                name="reply-test", display_name="reply-test"
+                            ),
                         },
                     ):
                         async for _ in stage.process(event):

@@ -1,3 +1,4 @@
+from astrbot.core.event_bus import EventBus
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -134,11 +135,13 @@ class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
         stage = WakingCheckStage()
         await stage.initialize(
             NS(
+                db_helper=None,
+                astrbot_config_id="test",
                 astrbot_config={
                     "wake_prefix": [""],
                     "platform_settings": {"unique_session": True},
                     "admins_id": ["member", "other"],
-                }
+                },
             )
         )
         events = [
@@ -157,6 +160,7 @@ class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             for event in events:
+                EventBus._apply_session_isolation(None, event, stage.ctx.astrbot_config)
                 await stage.process(event)
         await self.command(events[0], "入群关键词审批", "开启")
         self.assertTrue(

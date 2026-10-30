@@ -40,7 +40,7 @@ class CoreTests(unittest.TestCase):
     def setUp(self):
         # Core fixtures have no framework session database. Its authorization
         # integration is covered separately in test_interactions.
-        async def enabled(plugin, umo):
+        async def enabled(plugin, umo, actor_id=""):
             return plugin._umo_enabled(umo)
 
         patcher = patch.object(QQGroupAdminPlugin, "_sdk_group_enabled", enabled)
