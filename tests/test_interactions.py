@@ -17,6 +17,7 @@ from astrbot_plugin_qq_group_admin.main import (
     review_keyboard,
 )
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
+from astrbot_plugin_qq_group_admin.verify_flow import JoinVerifier
 from botpy.connection import ConnectionState
 from botpy.interaction import Interaction
 from http_fakes import make_http
@@ -124,6 +125,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(clock.stop)
         self.plugin._patched = {}
         self.plugin._patch_task = None
+        self.plugin._verify_task = None
+        self.plugin.verifier = JoinVerifier(self.plugin)
         self.plugin._sdk_event_tasks = set()
         self.plugin._terminating = False
         self.plugin._parser_state_class = None

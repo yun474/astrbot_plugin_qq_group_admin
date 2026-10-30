@@ -297,6 +297,120 @@
                 }
               }
             }
+          },
+          "verify_settings": {
+            "description": "⑨ 进群验证",
+            "type": "object",
+            "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+            "items": {
+              "enable_join_verify": {
+                "description": "启用进群验证",
+                "type": "bool",
+                "default": false,
+                "hint": "新成员进群后需答题验证；验证前发送的消息会被撤回并提醒。需要机器人是群管理员且能收到全部群消息。开启前已在群里的成员不受影响。"
+              },
+              "verify_mode": {
+                "description": "验证题型",
+                "type": "string",
+                "options": [
+                  "算术题",
+                  "自定义问题"
+                ],
+                "default": "算术题",
+                "hint": "算术题：随机加减乘除，点击按钮作答，需要按钮权限。自定义问题：新成员直接在群里发送答案，用正则判断。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "arithmetic_ops": {
+                "description": "算术题运算",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "加",
+                  "减",
+                  "乘",
+                  "除"
+                ],
+                "hint": "可填 加、减、乘、除，随机抽取一种；留空使用全部。除法保证整除，减法结果不为负。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "arithmetic_max_number": {
+                "description": "算术题数字上限",
+                "type": "int",
+                "default": 20,
+                "hint": "参与运算的数字范围为 1 到该值（2-1000）。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "custom_questions": {
+                "description": "自定义问题",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "hint": "每条写成 问题 => 正则，例如 本群主题是什么？ => ^(天文|astronomy)$。随机抽取一条，默认忽略大小写。没有有效题目时改用算术题。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_max_failures": {
+                "description": "允许答错次数",
+                "type": "int",
+                "default": 3,
+                "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_fail_mute_duration": {
+                "description": "验证失败禁言时长",
+                "type": "string",
+                "default": "1天",
+                "hint": "支持 30秒、10分、2小时、1天；必须大于 0，且不超过安全限制中的最长时长。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_timeout_minutes": {
+                "description": "验证限时（分钟）",
+                "type": "int",
+                "default": 10,
+                "hint": "填 0 表示不限时。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_timeout_action": {
+                "description": "超时处理",
+                "type": "string",
+                "options": [
+                  "不处理",
+                  "提醒一次",
+                  "按失败禁言"
+                ],
+                "default": "按失败禁言",
+                "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_prompt": {
+                "description": "验证题目模板",
+                "type": "text",
+                "default": "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}",
+                "hint": "支持 {member_at}（艾特新成员）、{question}（题目和作答方式）、{rules}（限时与次数说明）。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              }
+            }
           }
         }
       },
@@ -607,6 +721,120 @@
                 "condition": {
                   "confirmed": true
                 }
+              },
+              "verify_settings": {
+                "description": "⑨ 进群验证",
+                "type": "object",
+                "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+                "items": {
+                  "enable_join_verify": {
+                    "description": "启用进群验证",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "新成员进群后需答题验证；验证前发送的消息会被撤回并提醒。需要机器人是群管理员且能收到全部群消息。开启前已在群里的成员不受影响。"
+                  },
+                  "verify_mode": {
+                    "description": "验证题型",
+                    "type": "string",
+                    "options": [
+                      "算术题",
+                      "自定义问题"
+                    ],
+                    "default": "算术题",
+                    "hint": "算术题：随机加减乘除，点击按钮作答，需要按钮权限。自定义问题：新成员直接在群里发送答案，用正则判断。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "arithmetic_ops": {
+                    "description": "算术题运算",
+                    "type": "list",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": [
+                      "加",
+                      "减",
+                      "乘",
+                      "除"
+                    ],
+                    "hint": "可填 加、减、乘、除，随机抽取一种；留空使用全部。除法保证整除，减法结果不为负。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "arithmetic_max_number": {
+                    "description": "算术题数字上限",
+                    "type": "int",
+                    "default": 20,
+                    "hint": "参与运算的数字范围为 1 到该值（2-1000）。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "custom_questions": {
+                    "description": "自定义问题",
+                    "type": "list",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": [],
+                    "hint": "每条写成 问题 => 正则，例如 本群主题是什么？ => ^(天文|astronomy)$。随机抽取一条，默认忽略大小写。没有有效题目时改用算术题。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "verify_max_failures": {
+                    "description": "允许答错次数",
+                    "type": "int",
+                    "default": 3,
+                    "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "verify_fail_mute_duration": {
+                    "description": "验证失败禁言时长",
+                    "type": "string",
+                    "default": "1天",
+                    "hint": "支持 30秒、10分、2小时、1天；必须大于 0，且不超过安全限制中的最长时长。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "verify_timeout_minutes": {
+                    "description": "验证限时（分钟）",
+                    "type": "int",
+                    "default": 10,
+                    "hint": "填 0 表示不限时。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "verify_timeout_action": {
+                    "description": "超时处理",
+                    "type": "string",
+                    "options": [
+                      "不处理",
+                      "提醒一次",
+                      "按失败禁言"
+                    ],
+                    "default": "按失败禁言",
+                    "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  },
+                  "verify_prompt": {
+                    "description": "验证题目模板",
+                    "type": "text",
+                    "default": "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}",
+                    "hint": "支持 {member_at}（艾特新成员）、{question}（题目和作答方式）、{rules}（限时与次数说明）。",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
+                  }
+                }
               }
             }
           }
@@ -864,6 +1092,121 @@
         "type": "string",
         "default": "10分",
         "hint": "支持 30秒、10分、2小时、1天2小时；纯数字按分钟。必须大于 0，且不超过安全限制中的单次最长禁言秒数。"
+      }
+    },
+    "invisible": true
+  },
+  "verify_settings": {
+    "description": "⑨ 进群验证",
+    "type": "object",
+    "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+    "items": {
+      "enable_join_verify": {
+        "description": "启用进群验证",
+        "type": "bool",
+        "default": false,
+        "hint": "新成员进群后需答题验证；验证前发送的消息会被撤回并提醒。需要机器人是群管理员且能收到全部群消息。开启前已在群里的成员不受影响。"
+      },
+      "verify_mode": {
+        "description": "验证题型",
+        "type": "string",
+        "options": [
+          "算术题",
+          "自定义问题"
+        ],
+        "default": "算术题",
+        "hint": "算术题：随机加减乘除，点击按钮作答，需要按钮权限。自定义问题：新成员直接在群里发送答案，用正则判断。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "arithmetic_ops": {
+        "description": "算术题运算",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "加",
+          "减",
+          "乘",
+          "除"
+        ],
+        "hint": "可填 加、减、乘、除，随机抽取一种；留空使用全部。除法保证整除，减法结果不为负。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "arithmetic_max_number": {
+        "description": "算术题数字上限",
+        "type": "int",
+        "default": 20,
+        "hint": "参与运算的数字范围为 1 到该值（2-1000）。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "custom_questions": {
+        "description": "自定义问题",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "每条写成 问题 => 正则，例如 本群主题是什么？ => ^(天文|astronomy)$。随机抽取一条，默认忽略大小写。没有有效题目时改用算术题。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_max_failures": {
+        "description": "允许答错次数",
+        "type": "int",
+        "default": 3,
+        "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_fail_mute_duration": {
+        "description": "验证失败禁言时长",
+        "type": "string",
+        "default": "1天",
+        "hint": "支持 30秒、10分、2小时、1天；必须大于 0，且不超过安全限制中的最长时长。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_timeout_minutes": {
+        "description": "验证限时（分钟）",
+        "type": "int",
+        "default": 10,
+        "hint": "填 0 表示不限时。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_timeout_action": {
+        "description": "超时处理",
+        "type": "string",
+        "options": [
+          "不处理",
+          "提醒一次",
+          "按失败禁言"
+        ],
+        "default": "按失败禁言",
+        "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_prompt": {
+        "description": "验证题目模板",
+        "type": "text",
+        "default": "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}",
+        "hint": "支持 {member_at}（艾特新成员）、{question}（题目和作答方式）、{rules}（限时与次数说明）。",
+        "condition": {
+          "enable_join_verify": true
+        }
       }
     },
     "invisible": true

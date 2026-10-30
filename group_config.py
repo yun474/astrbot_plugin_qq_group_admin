@@ -15,6 +15,7 @@ GROUP_SECTIONS = (
     "llm_tool_settings",
     "limit_settings",
     "keyword_settings",
+    "verify_settings",
 )
 SCHEMA = json.loads(
     Path(__file__).with_name("_conf_schema.json").read_text(encoding="utf-8")

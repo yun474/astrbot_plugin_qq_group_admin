@@ -18,10 +18,19 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
+from .durations import parse_duration
 from .storage import PluginStorage
 from .group_config import GroupConfig
 from .keyword_rules import JOIN_REGEX_KEYS, compile_join_pattern, match_join_rules
-from .settings_menu import WORD_LISTS, KEYWORD_VALUES, keyword_summary, word_page
+from .join_verify import VERIFY_MODES
+from .settings_menu import (
+    KEYWORD_VALUES,
+    WORD_LISTS,
+    keyword_summary,
+    verify_summary,
+    word_page,
+)
+from .verify_flow import JoinVerifier
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_admin"
 QQ_PLATFORMS = {"qq_official", "qq_official_webhook"}
@@ -48,7 +57,6 @@ APPLY_SOURCE_NAMES = {
     "invite": "受邀加入",
     "admin_invite": "管理员邀请",
 }
-TIME_PART_RE = re.compile(r"(\d+)\s*(天|日|小时|时|分钟|分|秒|s|m|h|d)", re.I)
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ FEATURES = (
     FeatureDefinition(
         "违禁词撤回", "enable_keyword_recall", "关键词管理", default=False
     ),
+    FeatureDefinition("进群验证", "enable_join_verify", "进群验证", default=False),
     FeatureDefinition("LLM禁言工具", "enable_mute_tool", "LLM 工具"),
     FeatureDefinition("LLM解禁工具", "enable_unmute_tool", "LLM 工具"),
     FeatureDefinition("LLM禁言状态工具", "enable_mute_status_tool", "LLM 工具"),
@@ -124,11 +133,21 @@ CONFIG_SECTIONS = {
     "enable_keyword_recall": "keyword_settings",
     "mute_keywords": "keyword_settings",
     "keyword_mute_duration": "keyword_settings",
+    "enable_join_verify": "verify_settings",
+    "verify_mode": "verify_settings",
+    "arithmetic_ops": "verify_settings",
+    "arithmetic_max_number": "verify_settings",
+    "custom_questions": "verify_settings",
+    "verify_max_failures": "verify_settings",
+    "verify_fail_mute_duration": "verify_settings",
+    "verify_timeout_minutes": "verify_settings",
+    "verify_timeout_action": "verify_settings",
+    "verify_prompt": "verify_settings",
 }
 LEGACY_CONFIG_KEYS = tuple(
     key
     for key in CONFIG_SECTIONS
-    if CONFIG_SECTIONS[key] != "keyword_settings"
+    if CONFIG_SECTIONS[key] not in {"keyword_settings", "verify_settings"}
     and key
     not in {
         "enable_per_group_feature_settings",
@@ -172,33 +191,6 @@ def format_feature_status(
     else:
         lines.extend(("", "> 全局模式只有框架管理员允许更改"))
     return "\n".join(lines)
-
-
-def parse_duration(value: str) -> int:
-    text = value.strip().lower()
-    if text in {"0", "解除", "解禁", "取消"}:
-        return 0
-    if text.isdigit():
-        return int(text) * 60
-    units = {
-        "天": 86400,
-        "日": 86400,
-        "d": 86400,
-        "小时": 3600,
-        "时": 3600,
-        "h": 3600,
-        "分钟": 60,
-        "分": 60,
-        "m": 60,
-        "秒": 1,
-        "s": 1,
-    }
-    matches = list(TIME_PART_RE.finditer(text))
-    if not matches or "".join(match.group(0) for match in matches).replace(
-        " ", ""
-    ) != text.replace(" ", ""):
-        raise ValueError("时间格式错误，可用 30秒、10分、2小时、1天2小时；纯数字按分钟")
-    return sum(int(match.group(1)) * units[match.group(2).lower()] for match in matches)
 
 
 def intent_value(value: Any) -> int:
@@ -396,6 +388,13 @@ def format_group_admin_help(default_duration: str) -> str:
         "第一行「群管同意 / 群管拒绝」：QQ 群主、QQ 群管理员可操作。\n\n"
         "第二行「授权同意 / 授权拒绝」：发卡时的 AstrBot 管理员和本群插件群管可操作，点击时会再次检查授权。\n\n"
         "拒绝并填写理由时，可引用申请通知回复 `拒绝 理由`。\n\n"
+        "## 进群验证\n\n"
+        "> `验证列表`  \n"
+        "> 查看本群未完成验证的成员\n\n"
+        "> `验证放行 @用户`  \n"
+        "> 跳过验证；验证失败被禁言的成员会同时解禁\n\n"
+        "> `重新验证 @用户`  \n"
+        "> 重新出题，答错次数清零\n\n"
         "---\n\n"
         "💡 AstrBot 管理员拥有全局权限；插件群管和 QQ 群主/管理员拥有本群普通群管权限。"
     )
@@ -465,7 +464,7 @@ def review_quote(event: AstrMessageEvent) -> set[str] | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.7.3",
+    "2.8.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -490,6 +489,8 @@ class QQGroupAdminPlugin(Star):
         self._owned_parser_methods: dict[str, Any] = {}
         self._reviews_inflight: set[tuple[str, str, str]] = set()
         self._callback_guard = ReviewCallbackGuard()
+        self.verifier = JoinVerifier(self)
+        self._verify_task: asyncio.Task | None = None
         self._install_parser_patch()
 
     def _install_parser_patch(self) -> None:
@@ -546,6 +547,8 @@ class QQGroupAdminPlugin(Star):
             return
         if self._patch_task is None or self._patch_task.done():
             self._patch_task = asyncio.create_task(self._patch_platforms_until_ready())
+        if self._verify_task is None or self._verify_task.done():
+            self._verify_task = asyncio.create_task(self.verifier.run())
 
     async def _run_sdk_event(self, handler: Any, *args: Any) -> Any:
         # Own only our work, not the SDK dispatch task or another plugin's handler.
@@ -613,9 +616,13 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_group_member_add"],
                 ) -> None:
+                    # 先登记待验证再发欢迎，欢迎消息发送期间的发言也会被拦截。
+                    record = await self._run_sdk_event(self.verifier.prepare, pid, data)
                     await self._run_sdk_event(
                         self._handle_member_event, pid, "member_join", data
                     )
+                    if record is not None:
+                        await self._run_sdk_event(self.verifier.deliver, pid, record)
                     if original is not None:
                         result = original(data)
                         if hasattr(result, "__await__"):
@@ -629,6 +636,7 @@ class QQGroupAdminPlugin(Star):
                     await self._run_sdk_event(
                         self._handle_member_event, pid, "member_leave", data
                     )
+                    await self._run_sdk_event(self.verifier.clear, pid, data)
                     if original is not None:
                         result = original(data)
                         if hasattr(result, "__await__"):
@@ -643,6 +651,10 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_interaction_create"],
                 ) -> None:
+                    if await self._run_sdk_event(
+                        self.verifier.handle_interaction, pid, interaction
+                    ):
+                        return
                     if await self._run_sdk_event(
                         self._handle_review_interaction, pid, interaction
                     ):
@@ -1146,6 +1158,52 @@ class QQGroupAdminPlugin(Star):
             self._reviews_inflight.discard(request_key)
         return True
 
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200)
+    async def join_verify_guard(self, event: AstrMessageEvent) -> None:
+        # 先于违禁词和引用审批执行：未验证成员的消息只做验证处理。
+        await self.verifier.guard(event)
+
+    @filter.command("验证列表")
+    async def verify_list_command(self, event: AstrMessageEvent) -> None:
+        """查看本群未完成进群验证的成员。"""
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("你没有本群群管权限。")
+            return
+        yield event.plain_result(self.verifier.listing(event))
+
+    @filter.command("验证放行")
+    async def verify_release_command(self, event: AstrMessageEvent) -> None:
+        """放行被艾特成员的进群验证，验证失败的成员会同时解除禁言。"""
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("你没有本群群管权限。")
+            return
+        targets = self._mentioned_members(event)
+        if not targets:
+            yield event.plain_result("请艾特要放行的成员，例如：验证放行 @用户")
+            return
+        yield event.plain_result(await self.verifier.release(event, targets))
+
+    @filter.command("重新验证")
+    async def verify_restart_command(self, event: AstrMessageEvent) -> None:
+        """让被艾特的成员重新进行进群验证。"""
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("你没有本群群管权限。")
+            return
+        targets = self._mentioned_members(event)
+        if not targets:
+            yield event.plain_result("请艾特要重新验证的成员，例如：重新验证 @用户")
+            return
+        yield event.plain_result(await self.verifier.restart(event, targets))
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def keyword_mute(self, event: AstrMessageEvent) -> None:
         if not self._is_qq_group(event):
@@ -1538,6 +1596,7 @@ class QQGroupAdminPlugin(Star):
                     ),
                 }
             )
+            + verify_summary(self._event_setting(event, "verify_mode", "算术题"))
         ).use_markdown(True)
 
     def _save_setting(self, event: AstrMessageEvent, key: str, value: Any) -> None:
@@ -1598,6 +1657,9 @@ class QQGroupAdminPlugin(Star):
         if key == "join_keyword_priority":
             if value not in {"白词优先", "黑词优先"}:
                 raise ValueError("请选择 白词优先 或 黑词优先")
+        elif key == "verify_mode":
+            if value not in VERIFY_MODES:
+                raise ValueError("请选择 " + " 或 ".join(VERIFY_MODES))
         elif key == "join_keyword_match_mode":
             if value not in {"包含匹配", "正则匹配"}:
                 raise ValueError("请选择 包含匹配 或 正则匹配")
@@ -1836,7 +1898,18 @@ class QQGroupAdminPlugin(Star):
         member_openid: str,
         seconds: int,
     ) -> Any:
-        api = QQGroupManageAPI(self._platform(event).client)
+        return await self._mute_on_platform(
+            self._platform(event), group_openid, member_openid, seconds
+        )
+
+    async def _mute_on_platform(
+        self,
+        platform: Any,
+        group_openid: str,
+        member_openid: str,
+        seconds: int,
+    ) -> Any:
+        api = QQGroupManageAPI(platform.client)
         if seconds == 0:
             return await api.mute_member(group_openid, member_openid, op="del")
         expire_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(
@@ -2171,6 +2244,8 @@ class QQGroupAdminPlugin(Star):
         tasks = list(self._sdk_event_tasks)
         if self._patch_task is not None:
             tasks.append(self._patch_task)
+        if self._verify_task is not None:
+            tasks.append(self._verify_task)
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2179,6 +2254,7 @@ class QQGroupAdminPlugin(Star):
                 logger.error("[%s] 清理后台任务时出错：%r", PLUGIN_NAME, result)
         self._sdk_event_tasks.clear()
         self._patch_task = None
+        self._verify_task = None
 
 
 def render_member_notice(
