@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
+from astrbot_plugin_qq_group_admin.verify_flow import JoinVerifier
 import test_keywords
 
 
@@ -12,6 +13,8 @@ class HotReloadTests(unittest.IsolatedAsyncioTestCase):
         test_keywords.KeywordTests.setUp(self)
         self.plugin._patched = {}
         self.plugin._patch_task = None
+        self.plugin._verify_task = None
+        self.plugin.verifier = JoinVerifier(self.plugin)
         self.plugin._sdk_event_tasks = set()
         self.plugin._terminating = False
         self.plugin._parser_state_class = None

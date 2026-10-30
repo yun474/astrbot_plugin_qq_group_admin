@@ -136,6 +136,7 @@ class QQGroupManageAPI:
         content: str,
         *,
         event_id: str = "",
+        msg_id: str = "",
         keyboard: dict[str, Any] | None = None,
     ) -> Any:
         group_id = quote(group_openid, safe="")
@@ -146,6 +147,8 @@ class QQGroupManageAPI:
         }
         if event_id:
             payload["event_id"] = event_id
+        if msg_id:
+            payload["msg_id"] = msg_id
         if keyboard:
             payload["keyboard"] = keyboard
         return await self._request(
@@ -160,6 +163,7 @@ class QQGroupManageAPI:
         content: str,
         *,
         event_id: str = "",
+        msg_id: str = "",
         keyboard: dict[str, Any] | None = None,
     ) -> Any:
         group_id = quote(group_openid, safe="")
@@ -170,6 +174,8 @@ class QQGroupManageAPI:
         }
         if event_id:
             payload["event_id"] = event_id
+        if msg_id:
+            payload["msg_id"] = msg_id
         if keyboard:
             payload["keyboard"] = keyboard
         return await self._request(

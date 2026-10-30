@@ -12,6 +12,7 @@ KEYWORD_VALUES = {
     "进群匹配模式": "join_keyword_match_mode",
     "白黑词优先级": "join_keyword_priority",
     "违禁词时长": "keyword_mute_duration",
+    "验证模式": "verify_mode",
 }
 
 
@@ -73,6 +74,21 @@ def keyword_summary(values: dict) -> str:
         "\n> 链接只填入指令；添加、修改时补全内容再发送。支持含空格的完整词条。"
     )
     return "\n".join(lines)
+
+
+def verify_summary(mode: str) -> str:
+    other = "自定义问题" if mode == "算术题" else "算术题"
+    return "\n".join(
+        [
+            "",
+            "## 进群验证",
+            "",
+            f"验证题型：{escape(mode)} · "
+            + link("切换", f"群管功能 验证模式 设置 {other}"),
+            "",
+            "> 题库、答错次数、禁言时长和限时请在配置面板修改。",
+        ]
+    )
 
 
 def word_page(name: str, words: list[str], page: int, mode: str = "包含匹配") -> str:

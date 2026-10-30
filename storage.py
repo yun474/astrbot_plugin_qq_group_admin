@@ -18,6 +18,7 @@ class PluginStorage:
             "group_feature_overrides": {},
             "pending": {},
             "reviewed": {},
+            "verifications": {},
         }
         self.load()
 
@@ -44,9 +45,19 @@ class PluginStorage:
     def _validate(raw: Any) -> None:
         if not isinstance(raw, dict):
             raise ValueError("存储根节点必须是对象")
-        for name in ("group_admins", "group_feature_overrides", "pending", "reviewed"):
+        for name in (
+            "group_admins",
+            "group_feature_overrides",
+            "pending",
+            "reviewed",
+            "verifications",
+        ):
             if not isinstance(raw.get(name, {}), dict):
                 raise ValueError(f"{name} 必须是对象")
+        if any(
+            not isinstance(item, dict) for item in raw.get("verifications", {}).values()
+        ):
+            raise ValueError("进群验证记录必须是对象")
         if any(
             not isinstance(value, str) for value in raw.get("reviewed", {}).values()
         ):
@@ -276,6 +287,38 @@ class PluginStorage:
         if self.data["pending"].pop(notification_message_id, None) is not None:
             self.save()
 
+    @staticmethod
+    def _verification_key(platform_id: str, group_openid: str, member_openid: str) -> str:
+        return json.dumps([platform_id, group_openid, member_openid])
+
+    def verification(
+        self, platform_id: str, group_openid: str, member_openid: str
+    ) -> dict[str, Any] | None:
+        """返回实时记录对象，调用方修改后需调用 put_verification 保存。"""
+        return self.data["verifications"].get(
+            self._verification_key(platform_id, group_openid, member_openid)
+        )
+
+    def verifications(self) -> list[dict[str, Any]]:
+        return list(self.data["verifications"].values())
+
+    def put_verification(self, record: dict[str, Any]) -> None:
+        key = self._verification_key(
+            record["platform_id"], record["group_openid"], record["member_openid"]
+        )
+        self.data["verifications"][key] = record
+        self.save()
+
+    def remove_verification(
+        self, platform_id: str, group_openid: str, member_openid: str
+    ) -> dict[str, Any] | None:
+        record = self.data["verifications"].pop(
+            self._verification_key(platform_id, group_openid, member_openid), None
+        )
+        if record is not None:
+            self.save()
+        return record
+
     def prune(self, *, save: bool = True) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         removed = False
@@ -291,5 +334,6 @@ class PluginStorage:
                 if stored_at < cutoff:
                     del self.data[section][key]
                     removed = True
+        # 进群验证记录不在这里清理：只在验证通过、退群或管理员处理时删除。
         if removed and save:
             self.save()
