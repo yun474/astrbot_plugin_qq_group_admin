@@ -302,7 +302,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.api.get_group_member_info.assert_not_awaited()
         self.api.send_group_text.assert_awaited_once_with(
-            "g", "已同意入群申请。", event_id="outer-event"
+            "g",
+            '<qqbot-at-user id="astr-admin" /> 已同意入群申请。',
+            event_id="outer-event",
         )
         self.assertIsNone(self.plugin.storage.get_pending("notice"))
         self.now += 2

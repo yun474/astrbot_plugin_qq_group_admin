@@ -1144,9 +1144,10 @@ class QQGroupAdminPlugin(Star):
                     "已同意入群申请。" if action == "approve" else "已拒绝入群申请。"
                 )
             try:
+                # 结果前艾特点击按钮的处理人，方便群内知道是谁审批的。
                 await api.send_group_text(
                     group,
-                    result,
+                    f'<qqbot-at-user id="{sender}" /> {result}',
                     event_id=str(
                         getattr(interaction, "event_id", "") or interaction_id
                     ),
