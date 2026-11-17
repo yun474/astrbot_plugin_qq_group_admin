@@ -324,7 +324,7 @@
                 "description": "启用关键词踢人",
                 "type": "bool",
                 "default": false,
-                "hint": "命中独立的踢人词表后移出发言者。与违禁词禁言、撤回分别配置，需要能收到对应消息。"
+                "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
               },
               "kick_keywords": {
                 "description": "踢人词表",
@@ -334,13 +334,19 @@
                 },
                 "default": [],
                 "hint": "消息包含任一词条即触发，忽略大小写。"
+              },
+              "enable_keyword_kick_notice": {
+                "description": "启用关键词踢人结果通知",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
               }
             }
           },
           "verify_settings": {
             "description": "⑨ 进群验证",
             "type": "object",
-            "hint": "新成员进群后答题验证，答错和超时可分别选择禁言或移出群聊。",
+            "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
             "items": {
               "enable_join_verify": {
                 "description": "启用进群验证",
@@ -797,7 +803,7 @@
                     "description": "启用关键词踢人",
                     "type": "bool",
                     "default": false,
-                    "hint": "命中独立的踢人词表后移出发言者。与违禁词禁言、撤回分别配置，需要能收到对应消息。"
+                    "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
                   },
                   "kick_keywords": {
                     "description": "踢人词表",
@@ -807,6 +813,12 @@
                     },
                     "default": [],
                     "hint": "消息包含任一词条即触发，忽略大小写。"
+                  },
+                  "enable_keyword_kick_notice": {
+                    "description": "启用关键词踢人结果通知",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
                   }
                 },
                 "condition": {
@@ -816,7 +828,7 @@
               "verify_settings": {
                 "description": "⑨ 进群验证",
                 "type": "object",
-                "hint": "新成员进群后答题验证，答错和超时可分别选择禁言或移出群聊。",
+                "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
                 "items": {
                   "enable_join_verify": {
                     "description": "启用进群验证",
@@ -1225,7 +1237,7 @@
         "description": "启用关键词踢人",
         "type": "bool",
         "default": false,
-        "hint": "命中独立的踢人词表后移出发言者。与违禁词禁言、撤回分别配置，需要能收到对应消息。"
+        "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
       },
       "kick_keywords": {
         "description": "踢人词表",
@@ -1235,6 +1247,12 @@
         },
         "default": [],
         "hint": "消息包含任一词条即触发，忽略大小写。"
+      },
+      "enable_keyword_kick_notice": {
+        "description": "启用关键词踢人结果通知",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
       }
     },
     "invisible": true
@@ -1242,7 +1260,7 @@
   "verify_settings": {
     "description": "⑨ 进群验证",
     "type": "object",
-    "hint": "新成员进群后答题验证，答错和超时可分别选择禁言或移出群聊。",
+    "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
     "items": {
       "enable_join_verify": {
         "description": "启用进群验证",

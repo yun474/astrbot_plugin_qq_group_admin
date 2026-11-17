@@ -338,7 +338,13 @@ class PluginStorage:
         return self.data["removals"].get(key, {}).get("status", "")
 
     def put_removal(
-        self, platform: str, group: str, member: str, operation: str, status: str
+        self,
+        platform: str,
+        group: str,
+        member: str,
+        operation: str,
+        status: str,
+        **details: Any,
     ) -> None:
         """只保存一天内的操作结果，限制历史记录占用。"""
         records = self.data["removals"]
@@ -348,14 +354,61 @@ class PluginStorage:
             if record["stored_at"] < cutoff:
                 del records[key]
         key = json.dumps([platform, group, member, operation])
-        records[key] = {"status": status, "stored_at": time.time()}
+        records[key] = {
+            **records.get(key, {}),
+            **details,
+            "status": status,
+            "stored_at": time.time(),
+        }
         try:
             self.save()
         except OSError:
-            # 请求前保存失败尚未执行操作，可以回滚；成功标记必须留在内存去重。
-            if status != "success":
+            # 请求前保存失败尚未执行操作，可以回滚；已完成的结果保留在内存。
+            fallback_status = details.get("fallback_result", {}).get("status")
+            if status != "success" and fallback_status not in {"muted", "mute_failed"}:
                 self.data["removals"] = before
             raise
+
+    def removal_record(
+        self, platform: str, group: str, member: str, operation: str
+    ) -> dict:
+        return self.data["removals"].get(
+            json.dumps([platform, group, member, operation]), {}
+        )
+
+    def consume_removal_departure(self, platform: str, group: str, member: str) -> bool:
+        """关联本轮移出及其重复退群事件，昵称准备阶段仍发送正常退群通知。"""
+        cutoff = time.time() - 120
+        changed = False
+        suppress = False
+        for key, record in reversed(list(self.data["removals"].items())):
+            if json.loads(key)[:3] != [platform, group, member]:
+                continue
+            if record["stored_at"] < cutoff or record.get("rejoined"):
+                continue
+            if not record.get("departure_seen"):
+                record["departure_seen"] = True
+                changed = True
+            suppress |= (
+                record["status"] in {"success", "unknown"}
+                and record.get("phase") != "preparing"
+            )
+        if changed:
+            self.save()
+        return suppress
+
+    def reset_removal_departure(self, platform: str, group: str, member: str) -> None:
+        """重新入群后，旧操作不能吸收新一轮的退群通知。"""
+        changed = False
+        for key, record in self.data["removals"].items():
+            if json.loads(key)[:3] == [platform, group, member] and not record.get(
+                "rejoined"
+            ):
+                record["departure_seen"] = True
+                record["rejoined"] = True
+                changed = True
+        if changed:
+            self.save()
 
     def prune(self, *, save: bool = True) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)

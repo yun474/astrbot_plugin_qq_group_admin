@@ -13,6 +13,8 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Plain
 
 from .api import QQGroupManageAPI
+from .member_removal import RemovalError
+from .kick_notices import event_member_name
 from .durations import parse_duration
 from .join_verify import (
     DEFAULT_PROMPT,
@@ -296,22 +298,58 @@ class JoinVerifier:
         self.storage.put_verification(record)
         if action == "移出群聊":
             try:
-                await self.plugin.remover.remove(
+                result = await self.plugin.remover.remove(
                     record["platform_id"],
                     record["group_openid"],
                     record["member_openid"],
                     "verify:" + record["token"],
                     verification_locked=True,
+                    name_hint=event_member_name(event, record["member_openid"])
+                    if event is not None
+                    else record.get("username", ""),
+                    fallback_key="verify_fail_mute_duration",
                     can_execute=lambda: (
                         bool(self._setting(umo, "enable_join_verify", False))
                         and self._setting(umo, action_key, "禁言") == "移出群聊"
                     ),
                 )
-                text = "进群验证未通过，已移出群聊。"
+            except RemovalError as exc:
+                result = {**exc.member, "error": str(exc)}
             except Exception as exc:
                 logger.exception("[进群验证] 验证失败后移出未成功")
-                text = f"进群验证未通过，移出未完成，请管理员处理（{exc}）。"
-            await self._notice(platform, record, text, event=event, event_id=event_id)
+                result = {
+                    "name": record.get("username") or record["member_openid"],
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            if (
+                result.get("mute_attempted")
+                and self.storage.verification(
+                    record["platform_id"],
+                    record["group_openid"],
+                    record["member_openid"],
+                )
+                is record
+            ):
+                record["fail_action"] = "禁言"
+                try:
+                    self.storage.put_verification(record)
+                except OSError:
+                    logger.exception("[进群验证] 保存回退禁言状态失败")
+            reason = (
+                "超时未完成验证"
+                if action_key == "verify_timeout_action"
+                else f"答错达到 {record['failures']} 次"
+            )
+            await self.plugin._send_kick_notice(
+                record["platform_id"],
+                record["group_openid"],
+                [result],
+                "进群验证",
+                event=event,
+                event_id=event_id,
+                reason=reason,
+            )
             return
         duration = str(self._setting(umo, "verify_fail_mute_duration", "1天") or "1天")
         try:
@@ -395,6 +433,9 @@ class JoinVerifier:
                 if record is None:
                     stop = False  # 排队期间已通过或被放行
                     return
+                name = event_member_name(event, event.get_sender_id())
+                if name:
+                    record["username"] = name
                 await self._guard_message(event, record, umo)
         except Exception:
             logger.exception("[进群验证] 处理未验证成员的消息失败")
@@ -621,6 +662,17 @@ class JoinVerifier:
             return f"- {member}：{exc}"
         return ""
 
+    def _was_muted(self, record: dict[str, Any]) -> bool:
+        if record.get("fail_action", "禁言") == "禁言":
+            return True
+        saved = self.storage.removal_record(
+            record["platform_id"],
+            record["group_openid"],
+            record["member_openid"],
+            "verify:" + record["token"],
+        )
+        return bool(saved.get("fallback_result", {}).get("mute_attempted"))
+
     async def release(self, event: AstrMessageEvent, targets: list[str]) -> str:
         released = 0
         failures: list[str] = []
@@ -634,7 +686,7 @@ class JoinVerifier:
                 released += 1
                 if (
                     record["status"] == "failed"
-                    and record.get("fail_action", "禁言") == "禁言"
+                    and self._was_muted(record)
                     and (error := await self._unmute(event, member))
                 ):
                     failures.append(error)
@@ -658,7 +710,7 @@ class JoinVerifier:
                 if (
                     old is not None
                     and old["status"] == "failed"
-                    and old.get("fail_action", "禁言") == "禁言"
+                    and self._was_muted(old)
                 ):
                     if error := await self._unmute(event, member):
                         failures.append(error)

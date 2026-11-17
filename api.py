@@ -49,6 +49,7 @@ class QQGroupManageAPI:
             try:
                 return await _handle_response(response)
             except Exception as exc:
+                exc.http_status = response.status
                 # SDK 异常会丢弃业务错误码，保留字段供管理指令给出具体提示。
                 try:
                     data = await response.json()

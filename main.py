@@ -23,7 +23,8 @@ from .storage import PluginStorage
 from .group_config import GroupConfig
 from .keyword_rules import JOIN_REGEX_KEYS, compile_join_pattern, match_join_rules
 from .join_verify import VERIFY_MODES, TIMEOUT_ACTIONS
-from .member_removal import MemberRemover
+from .member_removal import MemberRemover, RemovalError
+from .kick_notices import event_member_name, notice_text
 from .settings_menu import (
     KEYWORD_VALUES,
     WORD_LISTS,
@@ -98,6 +99,9 @@ FEATURES = (
         "插件群管可踢人", "allow_plugin_admin_kick", "群信息与权限", default=False
     ),
     FeatureDefinition("违禁词踢人", "enable_keyword_kick", "发言管理", default=False),
+    FeatureDefinition(
+        "关键词踢人通知", "enable_keyword_kick_notice", "发言管理", default=False
+    ),
     FeatureDefinition("LLM踢人工具", "enable_kick_tool", "LLM工具", default=False),
     FeatureDefinition(
         "群主增删群管",
@@ -129,6 +133,7 @@ CONFIG_SECTIONS = {
     "enable_kick_command": "command_settings",
     "enable_kick_tool": "llm_tool_settings",
     "enable_keyword_kick": "keyword_settings",
+    "enable_keyword_kick_notice": "keyword_settings",
     "kick_keywords": "keyword_settings",
     "verify_fail_action": "verify_settings",
     "enabled_group_umos": "scope_settings",
@@ -649,6 +654,13 @@ class QQGroupAdminPlugin(Star):
                     pid: str = platform_id,
                     original: Any = old_handlers["on_group_member_add"],
                 ) -> None:
+                    if self._terminating:
+                        return
+                    self.storage.reset_removal_departure(
+                        pid,
+                        str(data.get("group_openid") or ""),
+                        str(data.get("member_openid") or ""),
+                    )
                     # 先登记待验证再发欢迎，欢迎消息发送期间的发言也会被拦截。
                     record = await self._run_sdk_event(self.verifier.prepare, pid, data)
                     await self._run_sdk_event(
@@ -814,6 +826,15 @@ class QQGroupAdminPlugin(Star):
         if not group_openid:
             logger.warning("[%s] 成员事件缺少 group_openid: %r", PLUGIN_NAME, item)
             return
+        if notice_type == "member_leave":
+            try:
+                if self.storage.consume_removal_departure(
+                    platform_id, group_openid, member_openid
+                ):
+                    return
+            except OSError:
+                logger.exception("[%s] 保存退群通知关联结果失败", PLUGIN_NAME)
+                return
         group_umo = self._group_umo(platform_id, group_openid)
         if not await self._sdk_group_enabled(group_umo):
             return
@@ -1306,11 +1327,13 @@ class QQGroupAdminPlugin(Star):
                 logger.exception("[%s] 违禁词消息撤回失败", PLUGIN_NAME)
         if kick_match:
             try:
-                await self.remover.remove(
+                result = await self.remover.remove(
                     event.get_platform_id(),
                     event.get_group_id(),
                     sender,
                     "keyword:" + str(event.message_obj.message_id),
+                    name_hint=event_member_name(event, sender),
+                    fallback_key="keyword_mute_duration",
                     can_execute=lambda: (
                         self._event_feature_setting(event, "enable_keyword_kick", False)
                         and contains_keyword(
@@ -1318,8 +1341,20 @@ class QQGroupAdminPlugin(Star):
                         )
                     ),
                 )
+            except RemovalError as exc:
+                result = {**exc.member, "error": str(exc)}
+                logger.warning("[%s] 关键词移出未完成：%s", PLUGIN_NAME, exc)
             except Exception:
                 logger.exception("[%s] 关键词自动踢人失败", PLUGIN_NAME)
+                return
+            if self._event_feature_setting(event, "enable_keyword_kick_notice", False):
+                await self._send_kick_notice(
+                    event.get_platform_id(),
+                    event.get_group_id(),
+                    [result],
+                    "关键词踢人",
+                    event=event,
+                )
             return
         if not mute_enabled or not mute_match:
             return
@@ -1490,16 +1525,16 @@ class QQGroupAdminPlugin(Star):
         if len(targets) > 10:
             yield event.plain_result("每次最多移出 10 名成员，请减少艾特人数。")
             return
-        failures = []
-        success = 0
+        results = []
         for member in targets:
             try:
-                await self.remover.remove(
+                result = await self.remover.remove(
                     event.get_platform_id(),
                     event.get_group_id(),
                     member,
                     "command:" + str(event.message_obj.message_id),
                     actor_id=event.get_sender_id(),
+                    name_hint=event_member_name(event, member),
                     can_execute=lambda: (
                         self._can_kick(event)
                         and self._event_feature_setting(
@@ -1507,13 +1542,20 @@ class QQGroupAdminPlugin(Star):
                         )
                     ),
                 )
-                success += 1
+                results.append(result)
+            except RemovalError as exc:
+                results.append({**exc.member, "error": str(exc)})
             except Exception as exc:
-                failures.append(f"- {member}：{exc}")
-        result = f"已移出 {success} 名成员。"
-        if failures:
-            result += "\n以下成员未完成移出：\n" + "\n".join(failures)
-        yield event.plain_result(result)
+                results.append(
+                    {
+                        "name": event_member_name(event, member) or member,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
+        yield event.plain_result(
+            notice_text(results, "群管指令 · 踢出", operator=event.get_sender_id())
+        ).use_markdown(True)
 
     @filter.command("添加群管")
     async def add_group_admin(self, event: AstrMessageEvent) -> None:
@@ -1902,20 +1944,39 @@ class QQGroupAdminPlugin(Star):
         if member_openid == event.get_self_id():
             return "不能移出机器人自身。"
         try:
-            await self.remover.remove(
+            result = await self.remover.remove(
                 event.get_platform_id(),
                 event.get_group_id(),
                 member_openid,
                 "tool:" + str(event.message_obj.message_id),
                 actor_id=event.get_sender_id(),
+                name_hint=event_member_name(event, member_openid),
                 can_execute=lambda: (
                     self._can_kick(event)
                     and self._event_feature_setting(event, "enable_kick_tool", False)
                 ),
             )
+        except RemovalError as exc:
+            result = {**exc.member, "error": str(exc)}
         except Exception as exc:
             return f"移出成员未完成：{exc}"
-        return "已成功移出该成员。"
+        sent = await self._send_kick_notice(
+            event.get_platform_id(),
+            event.get_group_id(),
+            [result],
+            "LLM 踢人工具",
+            event=event,
+        )
+        status = (
+            "已成功移出该成员。"
+            if result["status"] == "success"
+            else "移出未完成：" + result.get("error", "结果待确认")
+        )
+        return status + (
+            "详细结果已发送到群内，请简短回复。"
+            if sent
+            else "群内通知发送失败，请告知用户处理结果。"
+        )
 
     @filter.llm_tool(name="qq_group_mute_member")
     async def mute_tool(
@@ -2139,7 +2200,95 @@ class QQGroupAdminPlugin(Star):
             mute_expire_at=expire_at,
         )
 
+    async def _run_operation(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
+        """跟踪普通指令和工具中的异步工作，卸载前等待取消清理结束。"""
+        if getattr(self, "_terminating", False):
+            raise RuntimeError("插件正在重载，请稍后重试")
+        tasks = self.__dict__.setdefault("_operation_tasks", set())
+        task = asyncio.create_task(callback(*args, **kwargs))
+        tasks.add(task)
+        try:
+            return await task
+        finally:
+            tasks.discard(task)
+
+    async def _send_kick_notice(
+        self,
+        platform_id: str,
+        group: str,
+        results: list[dict],
+        source: str,
+        **kwargs: Any,
+    ) -> bool:
+        return await self._run_operation(
+            self._deliver_kick_notice, platform_id, group, results, source, **kwargs
+        )
+
+    async def _deliver_kick_notice(
+        self,
+        platform_id: str,
+        group: str,
+        results: list[dict],
+        source: str,
+        *,
+        event: Any = None,
+        event_id: str = "",
+        reason: str = "",
+    ) -> bool:
+        api = QQGroupManageAPI(self.context.get_platform_inst(platform_id).client)
+        message_id = (
+            str(event.message_obj.message_id or "") if event is not None else ""
+        )
+        try:
+            await asyncio.wait_for(
+                api.send_group_markdown(
+                    group,
+                    notice_text(results, source, reason=reason),
+                    msg_id=message_id,
+                    event_id=event_id,
+                ),
+                10,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "[%s] 移出通知 Markdown 发送失败，尝试文本", PLUGIN_NAME, exc_info=True
+            )
+        try:
+            await asyncio.wait_for(
+                api.send_group_text(
+                    group,
+                    notice_text(results, source, reason=reason, markdown=False),
+                    msg_id=message_id,
+                    event_id=event_id,
+                ),
+                10,
+            )
+            return True
+        except Exception:
+            logger.exception("[%s] 移出通知发送失败", PLUGIN_NAME)
+            return False
+
     async def _review(
+        self,
+        event: AstrMessageEvent,
+        group_openid: str,
+        member_openid: str,
+        join_request_id: str,
+        approve: bool,
+        reason: str,
+    ) -> Any:
+        return await self._run_operation(
+            self._review_request,
+            event,
+            group_openid,
+            member_openid,
+            join_request_id,
+            approve,
+            reason,
+        )
+
+    async def _review_request(
         self,
         event: AstrMessageEvent,
         group_openid: str,
@@ -2501,6 +2650,10 @@ class QQGroupAdminPlugin(Star):
         remover = getattr(self, "remover", None)
         if remover is not None:
             await remover.close()
+        operations = list(getattr(self, "_operation_tasks", ()))
+        for task in operations:
+            task.cancel()
+        await asyncio.gather(*operations, return_exceptions=True)
 
 
 def render_member_notice(

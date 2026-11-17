@@ -4,7 +4,7 @@ desc: QQ 官方机器人群管理：禁言、踢人、入群申请审批、进�
 short_desc: QQ 官方机器人禁言、踢人、入群审批、进群验证、进退群通知与分群管理员。
 author: yun474
 version: 2.9.0
-astrbot_version: ">=4.25.3"
+astrbot_version: ">=4.26.5"
 repo: https://github.com/yun474/astrbot_plugin_qq_group_admin
 support_platforms:
   - qq_official

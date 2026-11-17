@@ -23,6 +23,10 @@ import test_keywords
 import test_hot_reload
 
 
+def result_text(result):
+    return "".join(part.text for part in result.chain if isinstance(part, Plain))
+
+
 class KickMenuTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         test_keywords.KeywordTests.setUp(self)
@@ -165,12 +169,12 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
             event.is_at_or_wake_command = True
             self.assertTrue(command_filter.filter(event, {}))
             results = [
-                str(r)
+                result_text(r)
                 async for r in self.plugin.kick_command(
                     event, **event.get_extra("parsed_params")
                 )
             ]
-            self.assertIn("已移出 1", "".join(results))
+            self.assertIn("已移出群聊", "".join(results))
 
     def test_kick_permission_switches_are_independent(self):
         self.plugin.storage.add_group_admin("g", "assigned")
@@ -209,7 +213,7 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_denies_unauthorized_user_and_disabled_feature(self):
         result = [
-            str(r)
+            result_text(r)
             async for r in self.plugin.kick_command(
                 self.event(role="member", targets=["target"])
             )
@@ -217,7 +221,7 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没有本群踢人权限", "".join(result))
         self.plugin.config["command_settings"] = {"enable_kick_command": False}
         result = [
-            str(r)
+            result_text(r)
             async for r in self.plugin.kick_command(self.event(targets=["target"]))
         ]
         self.assertIn("已关闭", "".join(result))
@@ -225,26 +229,26 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_handles_multiple_members_and_deduplicates_delivery(self):
         event = self.event(targets=["a", "b"])
-        first = [str(r) async for r in self.plugin.kick_command(event)]
-        second = [str(r) async for r in self.plugin.kick_command(event)]
-        self.assertIn("已移出 2 名", "".join(first))
-        self.assertIn("已移出 2 名", "".join(second))
+        first = [result_text(r) async for r in self.plugin.kick_command(event)]
+        second = [result_text(r) async for r in self.plugin.kick_command(event)]
+        self.assertIn("成功 2 人", "".join(first))
+        self.assertIn("成功 2 人", "".join(second))
         self.assertEqual(self.api.remove_members.await_count, 2)
 
     async def test_more_than_ten_targets_are_rejected_without_silent_truncation(self):
         event = self.event(targets=[f"m{i}" for i in range(11)])
-        result = [str(r) async for r in self.plugin.kick_command(event)]
+        result = [result_text(r) async for r in self.plugin.kick_command(event)]
         self.assertIn("最多移出 10", "".join(result))
         self.api.remove_members.assert_not_awaited()
 
     async def test_transport_error_is_persisted_and_not_retried_after_reload(self):
         self.api.remove_members.side_effect = TimeoutError()
         event = self.event(targets=["a"])
-        first = [str(r) async for r in self.plugin.kick_command(event)]
+        first = [result_text(r) async for r in self.plugin.kick_command(event)]
         self.assertIn("结果待确认", "".join(first))
         self.plugin.storage = PluginStorage(self.plugin.storage.path)
         self.plugin.remover = MemberRemover(self.plugin)
-        second = [str(r) async for r in self.plugin.kick_command(event)]
+        second = [result_text(r) async for r in self.plugin.kick_command(event)]
         self.assertIn("结果待确认", "".join(second))
         self.api.remove_members.assert_awaited_once()
 
@@ -253,7 +257,8 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
         error.qq_code = 40103012
         self.api.remove_members.side_effect = error
         result = [
-            str(r) async for r in self.plugin.kick_command(self.event(targets=["a"]))
+            result_text(r)
+            async for r in self.plugin.kick_command(self.event(targets=["a"]))
         ]
         self.assertIn("请群主", "".join(result))
 
@@ -317,8 +322,10 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.config["llm_tool_settings"] = {"enable_kick_tool": True}
         self.assertFalse(await self.plugin._sdk_group_enabled("p:GroupMessage:g"))
         event = self.event(targets=["manual-target"])
-        results = [str(result) async for result in self.plugin.kick_command(event)]
-        self.assertIn("已移出 1", "".join(results))
+        results = [
+            result_text(result) async for result in self.plugin.kick_command(event)
+        ]
+        self.assertIn("已移出群聊", "".join(results))
         self.assertIn("已成功", await self.plugin.kick_tool(event, "tool-target"))
         self.assertEqual(self.api.remove_members.await_count, 2)
         with self.assertRaisesRegex(ValueError, "未启用"):
@@ -337,8 +344,10 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
         }
         event = self.event(targets=["target"])
         event.role = "admin"
-        results = [str(result) async for result in self.plugin.kick_command(event)]
-        self.assertIn("已移出 1", "".join(results))
+        results = [
+            result_text(result) async for result in self.plugin.kick_command(event)
+        ]
+        self.assertIn("已移出群聊", "".join(results))
         self.api.remove_members.assert_awaited_once()
 
     async def test_queued_kick_rechecks_authorization_and_feature_before_request(self):
@@ -369,7 +378,7 @@ class KickMenuTests(unittest.IsolatedAsyncioTestCase):
                     if revoked == "tool":
                         return await self.plugin.kick_tool(event, "target")
                     return "".join(
-                        [str(r) async for r in self.plugin.kick_command(event)]
+                        [result_text(r) async for r in self.plugin.kick_command(event)]
                     )
 
                 task = asyncio.create_task(run())
