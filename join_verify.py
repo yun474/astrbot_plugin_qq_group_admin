@@ -15,7 +15,8 @@ VERIFY_MODES = (MODE_ARITHMETIC, MODE_CUSTOM)
 TIMEOUT_IGNORE = "不处理"
 TIMEOUT_REMIND = "提醒一次"
 TIMEOUT_FAIL = "按失败禁言"
-TIMEOUT_ACTIONS = (TIMEOUT_IGNORE, TIMEOUT_REMIND, TIMEOUT_FAIL)
+TIMEOUT_KICK = "移出群聊"
+TIMEOUT_ACTIONS = (TIMEOUT_IGNORE, TIMEOUT_REMIND, TIMEOUT_FAIL, TIMEOUT_KICK)
 OPERATORS = {"加": "+", "减": "-", "乘": "×", "除": "÷"}
 OPTION_COUNT = 4
 DEFAULT_PROMPT = "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}"
@@ -41,7 +42,9 @@ def make_arithmetic(
         answer = {"加": a + b, "减": a - b, "乘": a * b}[op]
     # 干扰项围绕正确答案生成，避免一眼看出唯一的“合理”选项。
     candidates = [
-        value for value in range(answer - 10, answer + 11) if value >= 0 and value != answer
+        value
+        for value in range(answer - 10, answer + 11)
+        if value >= 0 and value != answer
     ]
     options = rng.sample(candidates, OPTION_COUNT - 1)
     correct = rng.randrange(OPTION_COUNT)
@@ -76,7 +79,9 @@ def check_custom_answer(pattern: str, text: str) -> bool:
     return bool(compile_join_pattern(pattern).search(text, timeout=MATCH_TIMEOUT))
 
 
-def verify_keyboard(token: str, member_openid: str, options: list[str]) -> dict[str, Any]:
+def verify_keyboard(
+    token: str, member_openid: str, options: list[str]
+) -> dict[str, Any]:
     """选项按钮只允许被验证的新成员点击。"""
     return {
         "content": {
@@ -116,11 +121,19 @@ def question_text(record: dict[str, Any]) -> str:
     return f"{record['question']}\n（点击下方按钮选择答案）"
 
 
-def rules_text(max_failures: int, timeout_minutes: int, timeout_action: str) -> str:
-    parts = [f"答错 {max_failures} 次将被禁言"]
+def rules_text(
+    max_failures: int,
+    timeout_minutes: int,
+    timeout_action: str,
+    fail_action: str = "禁言",
+) -> str:
+    punishment = "移出群聊" if fail_action == "移出群聊" else "禁言"
+    parts = [f"答错 {max_failures} 次将被{punishment}"]
     if timeout_minutes > 0:
-        if timeout_action == TIMEOUT_FAIL:
-            parts.insert(0, f"限时 {timeout_minutes} 分钟，超时按未通过处理")
+        if timeout_action == TIMEOUT_KICK:
+            parts.insert(0, f"限时 {timeout_minutes} 分钟，超时将被移出群聊")
+        elif timeout_action == TIMEOUT_FAIL:
+            parts.insert(0, f"限时 {timeout_minutes} 分钟，超时将被禁言")
         else:
             parts.insert(0, f"请在 {timeout_minutes} 分钟内完成")
     parts.append("验证前发送的消息会被撤回")

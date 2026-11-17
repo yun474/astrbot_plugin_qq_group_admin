@@ -42,7 +42,7 @@
           "permission_settings": {
             "description": "② 群管权限",
             "type": "object",
-            "hint": "AstrBot 管理员始终拥有全局权限。插件群管、QQ 群主和 QQ 群管理员可执行普通群管操作；下面两项只控制谁能增删插件群管。",
+            "hint": "AstrBot 管理员始终拥有管理权限。可分别设置原生群主/管理员与插件群管的踢人权限，以及增删插件群管的权限。",
             "items": {
               "allow_group_owner_manage_plugin_admins": {
                 "description": "群主可增删插件群管",
@@ -55,6 +55,18 @@
                 "type": "bool",
                 "default": false,
                 "hint": "关闭时 QQ 原生群管理员不能使用 添加群管 和 删除群管，除非他同时是 AstrBot 管理员。"
+              },
+              "allow_native_admin_kick": {
+                "description": "群主/管理员可使用踢人",
+                "type": "bool",
+                "default": true,
+                "hint": "控制 QQ 群主和原生群管理员使用踢人指令与踢人工具。"
+              },
+              "allow_plugin_admin_kick": {
+                "description": "插件群管可使用踢人",
+                "type": "bool",
+                "default": false,
+                "hint": "控制本群插件群管使用踢人指令与踢人工具。"
               }
             }
           },
@@ -92,6 +104,12 @@
                 "type": "string",
                 "default": "1分",
                 "hint": "执行 禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
+              },
+              "enable_kick_command": {
+                "description": "启用踢人指令",
+                "type": "bool",
+                "default": true,
+                "hint": "控制 踢出 @成员，可同时艾特最多 10 名成员。"
               }
             }
           },
@@ -189,6 +207,12 @@
                 "description": "启用 LLM 入群申请审批工具",
                 "type": "bool",
                 "default": true
+              },
+              "enable_kick_tool": {
+                "description": "启用 LLM 踢人工具",
+                "type": "bool",
+                "default": false,
+                "hint": "工具始终检查踢人使用权限，受群主/管理员与插件群管两项踢人开关控制。"
               }
             }
           },
@@ -295,13 +319,34 @@
                 "condition": {
                   "enable_keyword_mute": true
                 }
+              },
+              "enable_keyword_kick": {
+                "description": "启用关键词踢人",
+                "type": "bool",
+                "default": false,
+                "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
+              },
+              "kick_keywords": {
+                "description": "踢人词表",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "hint": "消息包含任一词条即触发，忽略大小写。"
+              },
+              "enable_keyword_kick_notice": {
+                "description": "启用关键词踢人结果通知",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
               }
             }
           },
           "verify_settings": {
             "description": "⑨ 进群验证",
             "type": "object",
-            "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+            "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
             "items": {
               "enable_join_verify": {
                 "description": "启用进群验证",
@@ -364,7 +409,7 @@
                 "description": "允许答错次数",
                 "type": "int",
                 "default": 3,
-                "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+                "hint": "答错达到该次数后执行所选处理。",
                 "condition": {
                   "enable_join_verify": true
                 }
@@ -393,7 +438,8 @@
                 "options": [
                   "不处理",
                   "提醒一次",
-                  "按失败禁言"
+                  "按失败禁言",
+                  "移出群聊"
                 ],
                 "default": "按失败禁言",
                 "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
@@ -406,6 +452,18 @@
                 "type": "text",
                 "default": "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}",
                 "hint": "支持 {member_at}（艾特新成员）、{question}（题目和作答方式）、{rules}（限时与次数说明）。",
+                "condition": {
+                  "enable_join_verify": true
+                }
+              },
+              "verify_fail_action": {
+                "description": "答错达到上限后的处理",
+                "type": "string",
+                "options": [
+                  "禁言",
+                  "移出群聊"
+                ],
+                "default": "禁言",
                 "condition": {
                   "enable_join_verify": true
                 }
@@ -450,7 +508,7 @@
               "permission_settings": {
                 "description": "② 群管权限",
                 "type": "object",
-                "hint": "AstrBot 管理员始终拥有全局权限。插件群管、QQ 群主和 QQ 群管理员可执行普通群管操作；下面两项只控制谁能增删插件群管。",
+                "hint": "AstrBot 管理员始终拥有管理权限。可分别设置原生群主/管理员与插件群管的踢人权限，以及增删插件群管的权限。",
                 "items": {
                   "allow_group_owner_manage_plugin_admins": {
                     "description": "群主可增删插件群管",
@@ -463,6 +521,18 @@
                     "type": "bool",
                     "default": false,
                     "hint": "关闭时 QQ 原生群管理员不能使用 添加群管 和 删除群管，除非他同时是 AstrBot 管理员。"
+                  },
+                  "allow_native_admin_kick": {
+                    "description": "群主/管理员可使用踢人",
+                    "type": "bool",
+                    "default": true,
+                    "hint": "控制 QQ 群主和原生群管理员使用踢人指令与踢人工具。"
+                  },
+                  "allow_plugin_admin_kick": {
+                    "description": "插件群管可使用踢人",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "控制本群插件群管使用踢人指令与踢人工具。"
                   }
                 },
                 "condition": {
@@ -503,6 +573,12 @@
                     "type": "string",
                     "default": "1分",
                     "hint": "执行 禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
+                  },
+                  "enable_kick_command": {
+                    "description": "启用踢人指令",
+                    "type": "bool",
+                    "default": true,
+                    "hint": "控制 踢出 @成员，可同时艾特最多 10 名成员。"
                   }
                 },
                 "condition": {
@@ -604,6 +680,12 @@
                     "description": "启用 LLM 入群申请审批工具",
                     "type": "bool",
                     "default": true
+                  },
+                  "enable_kick_tool": {
+                    "description": "启用 LLM 踢人工具",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "工具始终检查踢人使用权限，受群主/管理员与插件群管两项踢人开关控制。"
                   }
                 },
                 "condition": {
@@ -716,6 +798,27 @@
                     "condition": {
                       "keyword_settings.enable_keyword_mute": true
                     }
+                  },
+                  "enable_keyword_kick": {
+                    "description": "启用关键词踢人",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
+                  },
+                  "kick_keywords": {
+                    "description": "踢人词表",
+                    "type": "list",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": [],
+                    "hint": "消息包含任一词条即触发，忽略大小写。"
+                  },
+                  "enable_keyword_kick_notice": {
+                    "description": "启用关键词踢人结果通知",
+                    "type": "bool",
+                    "default": false,
+                    "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
                   }
                 },
                 "condition": {
@@ -725,7 +828,7 @@
               "verify_settings": {
                 "description": "⑨ 进群验证",
                 "type": "object",
-                "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+                "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
                 "items": {
                   "enable_join_verify": {
                     "description": "启用进群验证",
@@ -788,7 +891,7 @@
                     "description": "允许答错次数",
                     "type": "int",
                     "default": 3,
-                    "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+                    "hint": "答错达到该次数后执行所选处理。",
                     "condition": {
                       "enable_join_verify": true
                     }
@@ -817,7 +920,8 @@
                     "options": [
                       "不处理",
                       "提醒一次",
-                      "按失败禁言"
+                      "按失败禁言",
+                      "移出群聊"
                     ],
                     "default": "按失败禁言",
                     "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
@@ -833,6 +937,18 @@
                     "condition": {
                       "enable_join_verify": true
                     }
+                  },
+                  "verify_fail_action": {
+                    "description": "答错达到上限后的处理",
+                    "type": "string",
+                    "options": [
+                      "禁言",
+                      "移出群聊"
+                    ],
+                    "default": "禁言",
+                    "condition": {
+                      "enable_join_verify": true
+                    }
                   }
                 }
               }
@@ -845,7 +961,7 @@
   "permission_settings": {
     "description": "② 群管权限",
     "type": "object",
-    "hint": "AstrBot 管理员始终拥有全局权限。插件群管、QQ 群主和 QQ 群管理员可执行普通群管操作；下面两项只控制谁能增删插件群管。",
+    "hint": "AstrBot 管理员始终拥有管理权限。可分别设置原生群主/管理员与插件群管的踢人权限，以及增删插件群管的权限。",
     "items": {
       "allow_group_owner_manage_plugin_admins": {
         "description": "群主可增删插件群管",
@@ -858,6 +974,18 @@
         "type": "bool",
         "default": false,
         "hint": "关闭时 QQ 原生群管理员不能使用 添加群管 和 删除群管，除非他同时是 AstrBot 管理员。"
+      },
+      "allow_native_admin_kick": {
+        "description": "群主/管理员可使用踢人",
+        "type": "bool",
+        "default": true,
+        "hint": "控制 QQ 群主和原生群管理员使用踢人指令与踢人工具。"
+      },
+      "allow_plugin_admin_kick": {
+        "description": "插件群管可使用踢人",
+        "type": "bool",
+        "default": false,
+        "hint": "控制本群插件群管使用踢人指令与踢人工具。"
       }
     },
     "invisible": true
@@ -896,6 +1024,12 @@
         "type": "string",
         "default": "1分",
         "hint": "执行 禁言 时不填写时间就使用此值。支持 30秒、10分、2小时、1天2小时；纯数字按分钟。LLM 禁言工具省略时长时也使用此值。"
+      },
+      "enable_kick_command": {
+        "description": "启用踢人指令",
+        "type": "bool",
+        "default": true,
+        "hint": "控制 踢出 @成员，可同时艾特最多 10 名成员。"
       }
     },
     "invisible": true
@@ -996,6 +1130,12 @@
         "description": "启用 LLM 入群申请审批工具",
         "type": "bool",
         "default": true
+      },
+      "enable_kick_tool": {
+        "description": "启用 LLM 踢人工具",
+        "type": "bool",
+        "default": false,
+        "hint": "工具始终检查踢人使用权限，受群主/管理员与插件群管两项踢人开关控制。"
       }
     },
     "invisible": true
@@ -1092,6 +1232,27 @@
         "type": "string",
         "default": "10分",
         "hint": "支持 30秒、10分、2小时、1天2小时；纯数字按分钟。必须大于 0，且不超过安全限制中的单次最长禁言秒数。"
+      },
+      "enable_keyword_kick": {
+        "description": "启用关键词踢人",
+        "type": "bool",
+        "default": false,
+        "hint": "命中踢人词表后移出发言者，移出失败时按违禁词禁言时长回退禁言。"
+      },
+      "kick_keywords": {
+        "description": "踢人词表",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "消息包含任一词条即触发，忽略大小写。"
+      },
+      "enable_keyword_kick_notice": {
+        "description": "启用关键词踢人结果通知",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后发送详细 Markdown 结果，展示成员昵称、头像及回退禁言结果。"
       }
     },
     "invisible": true
@@ -1099,7 +1260,7 @@
   "verify_settings": {
     "description": "⑨ 进群验证",
     "type": "object",
-    "hint": "新成员进群后答题验证，答错或超时可禁言。QQ 暂未开放移出成员接口，因此不支持踢出。",
+    "hint": "新成员答题验证，答错和超时可分别选择禁言或移出。移出失败时按验证失败禁言时长回退禁言。",
     "items": {
       "enable_join_verify": {
         "description": "启用进群验证",
@@ -1162,7 +1323,7 @@
         "description": "允许答错次数",
         "type": "int",
         "default": 3,
-        "hint": "答错达到该次数后禁言，并等待管理员发送 验证放行 或 重新验证。",
+        "hint": "答错达到该次数后执行所选处理。",
         "condition": {
           "enable_join_verify": true
         }
@@ -1191,7 +1352,8 @@
         "options": [
           "不处理",
           "提醒一次",
-          "按失败禁言"
+          "按失败禁言",
+          "移出群聊"
         ],
         "default": "按失败禁言",
         "hint": "超时后只处理一次；未完成验证前发送的消息仍会被撤回。",
@@ -1204,6 +1366,18 @@
         "type": "text",
         "default": "{member_at} 欢迎入群！请先完成进群验证：\n\n{question}\n\n{rules}",
         "hint": "支持 {member_at}（艾特新成员）、{question}（题目和作答方式）、{rules}（限时与次数说明）。",
+        "condition": {
+          "enable_join_verify": true
+        }
+      },
+      "verify_fail_action": {
+        "description": "答错达到上限后的处理",
+        "type": "string",
+        "options": [
+          "禁言",
+          "移出群聊"
+        ],
+        "default": "禁言",
         "condition": {
           "enable_join_verify": true
         }

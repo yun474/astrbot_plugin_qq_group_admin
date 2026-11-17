@@ -755,17 +755,20 @@ class CoreTests(unittest.TestCase):
         values = {feature.name: True for feature in FEATURES}
         markdown = format_feature_status(values, per_group=True)
 
-        self.assertIn("当前开关模式：**分群**", markdown)
-        self.assertIn("禁言指令：[已开启]", markdown)
+        self.assertIn("当前配置：**分群**", markdown)
+        self.assertIn("[成员管理]", markdown)
+        self.assertNotIn("禁言指令", markdown)
+        page = format_feature_status(values, per_group=True, page="成员管理")
+        self.assertIn("禁言指令：[已开启]", page)
         self.assertIn("command=%E7%BE%A4%E7%AE%A1%E5%8A%9F%E8%83%BD", markdown)
         self.assertNotIn("command=%2F", markdown)
         self.assertIn("&enter=false&reply=false", markdown)
         self.assertNotIn("/群管功能 禁言指令 关闭", markdown)
 
         global_markdown = format_feature_status(values, per_group=False)
-        self.assertIn("当前开关模式：**全局**", global_markdown)
+        self.assertIn("当前配置：**全局**", global_markdown)
         self.assertIn("mqqapi://", global_markdown)
-        self.assertIn("全局模式只有框架管理员允许更改", global_markdown)
+        self.assertNotIn("填入", global_markdown)
 
     def test_group_feature_command_updates_inverted_notice_setting(self) -> None:
         class Result:
@@ -818,8 +821,9 @@ class CoreTests(unittest.TestCase):
                 "command_settings"
             ]["silent_mute_success_notice"]
         )
-        self.assertFalse(results[0].markdown)
-        self.assertEqual(results[0].text, "禁言成功提示已关闭。")
+        self.assertTrue(results[0].markdown)
+        self.assertTrue(results[0].text.startswith("禁言成功提示已关闭。"))
+        self.assertIn("返回分类", results[0].text)
 
     def test_astr_admin_global_change_is_saved_to_config(self) -> None:
         class Config(dict):
@@ -876,7 +880,7 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(plugin.config["command_settings"]["enable_mute_command"])
         self.assertFalse(plugin.config["enable_mute_command"])
         self.assertEqual(plugin.config.save_calls, 1)
-        self.assertEqual(results[0].text, "禁言指令已关闭。")
+        self.assertTrue(results[0].text.startswith("禁言指令已关闭。"))
 
     def test_non_astr_admin_cannot_change_global_setting(self) -> None:
         class Event:
