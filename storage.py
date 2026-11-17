@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ class PluginStorage:
             "pending": {},
             "reviewed": {},
             "verifications": {},
+            "removals": {},
         }
         self.load()
 
@@ -51,9 +53,17 @@ class PluginStorage:
             "pending",
             "reviewed",
             "verifications",
+            "removals",
         ):
             if not isinstance(raw.get(name, {}), dict):
                 raise ValueError(f"{name} 必须是对象")
+        if any(
+            not isinstance(item, dict)
+            or item.get("status") not in {"success", "failed", "unknown"}
+            or not isinstance(item.get("stored_at"), (int, float))
+            for item in raw.get("removals", {}).values()
+        ):
+            raise ValueError("移出成员记录格式无效")
         if any(
             not isinstance(item, dict) for item in raw.get("verifications", {}).values()
         ):
@@ -288,7 +298,9 @@ class PluginStorage:
             self.save()
 
     @staticmethod
-    def _verification_key(platform_id: str, group_openid: str, member_openid: str) -> str:
+    def _verification_key(
+        platform_id: str, group_openid: str, member_openid: str
+    ) -> str:
         return json.dumps([platform_id, group_openid, member_openid])
 
     def verification(
@@ -318,6 +330,32 @@ class PluginStorage:
         if record is not None:
             self.save()
         return record
+
+    def removal_result(
+        self, platform: str, group: str, member: str, operation: str
+    ) -> str:
+        key = json.dumps([platform, group, member, operation])
+        return self.data["removals"].get(key, {}).get("status", "")
+
+    def put_removal(
+        self, platform: str, group: str, member: str, operation: str, status: str
+    ) -> None:
+        """只保存一天内的操作结果，限制历史记录占用。"""
+        records = self.data["removals"]
+        before = records.copy()
+        cutoff = time.time() - 86400
+        for key, record in list(records.items()):
+            if record["stored_at"] < cutoff:
+                del records[key]
+        key = json.dumps([platform, group, member, operation])
+        records[key] = {"status": status, "stored_at": time.time()}
+        try:
+            self.save()
+        except OSError:
+            # 请求前保存失败尚未执行操作，可以回滚；成功标记必须留在内存去重。
+            if status != "success":
+                self.data["removals"] = before
+            raise
 
     def prune(self, *, save: bool = True) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)

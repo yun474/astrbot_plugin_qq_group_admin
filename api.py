@@ -46,7 +46,27 @@ class QQGroupManageAPI:
             timeout=ClientTimeout(total=http.timeout),
             **kwargs,
         ) as response:
-            return await _handle_response(response)
+            try:
+                return await _handle_response(response)
+            except Exception as exc:
+                # SDK 异常会丢弃业务错误码，保留字段供管理指令给出具体提示。
+                try:
+                    data = await response.json()
+                    exc.qq_code = data.get("code") if isinstance(data, dict) else None
+                except Exception:
+                    pass
+                raise
+
+    async def remove_members(self, group_openid: str, member_openids: list[str]) -> Any:
+        """移出群成员，严格校验官方接口的数量限制。"""
+        members = list(dict.fromkeys(member_openids))
+        if not members or len(members) > 20 or any(not member for member in members):
+            raise ValueError("每次移出成员数量应在 1 到 20 人之间")
+        return await self._request(
+            "POST",
+            f"/v2/groups/{quote(group_openid, safe='')}/batch_remove_members",
+            payload={"member_openids": members},
+        )
 
     async def mute_member(
         self,

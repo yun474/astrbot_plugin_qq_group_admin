@@ -20,6 +20,7 @@ from .join_verify import (
     MODE_CUSTOM,
     TIMEOUT_FAIL,
     TIMEOUT_REMIND,
+    TIMEOUT_KICK,
     VERIFY_CALLBACK_RE,
     check_custom_answer,
     make_arithmetic,
@@ -110,23 +111,30 @@ class JoinVerifier:
                 list(self._setting(umo, "custom_questions", []) or [])
             )
             if invalid:
-                logger.warning("[进群验证] 以下自定义问题格式或正则无效，已跳过：%s", invalid)
+                logger.warning(
+                    "[进群验证] 以下自定义问题格式或正则无效，已跳过：%s", invalid
+                )
             if questions:
                 question, pattern = secrets.choice(questions)
-                record.update(mode="custom", question=question, answer=pattern, options=[])
+                record.update(
+                    mode="custom", question=question, answer=pattern, options=[]
+                )
                 return
             logger.warning("[进群验证] %s 没有有效的自定义问题，改用算术题", umo)
         question, options, correct = make_arithmetic(
             list(self._setting(umo, "arithmetic_ops", []) or []),
             self._int_setting(umo, "arithmetic_max_number", 20, 2),
         )
-        record.update(mode="arithmetic", question=question, options=options, answer=correct)
+        record.update(
+            mode="arithmetic", question=question, options=options, answer=correct
+        )
 
     def _rules(self, umo: str) -> str:
         return rules_text(
             self._int_setting(umo, "verify_max_failures", 3, 1),
             self._int_setting(umo, "verify_timeout_minutes", 10, 0),
             str(self._setting(umo, "verify_timeout_action", TIMEOUT_FAIL)),
+            str(self._setting(umo, "verify_fail_action", "禁言")),
         )
 
     async def send_question(
@@ -155,7 +163,11 @@ class JoinVerifier:
                 api.send_group_markdown(
                     group,
                     render_prompt(
-                        template, member, question_text(record), self._rules(umo), markdown=True
+                        template,
+                        member,
+                        question_text(record),
+                        self._rules(umo),
+                        markdown=True,
                     ),
                     event_id=event_id,
                     keyboard=verify_keyboard(record["token"], member, record["options"])
@@ -166,7 +178,9 @@ class JoinVerifier:
             )
             return True
         except Exception:
-            logger.warning("[进群验证] Markdown 题目发送失败，降级为普通文本", exc_info=True)
+            logger.warning(
+                "[进群验证] Markdown 题目发送失败，降级为普通文本", exc_info=True
+            )
         if buttons:
             # 没有按钮可点时改为直接发送答案数字。
             record["text_answer"] = True
@@ -176,7 +190,11 @@ class JoinVerifier:
                 api.send_group_text(
                     group,
                     render_prompt(
-                        template, member, question_text(record), self._rules(umo), markdown=False
+                        template,
+                        member,
+                        question_text(record),
+                        self._rules(umo),
+                        markdown=False,
                     ),
                     event_id=event_id,
                 ),
@@ -211,7 +229,9 @@ class JoinVerifier:
             )
             return
         except Exception:
-            logger.warning("[进群验证] Markdown 提示发送失败，降级为普通文本", exc_info=True)
+            logger.warning(
+                "[进群验证] Markdown 提示发送失败，降级为普通文本", exc_info=True
+            )
         try:
             await asyncio.wait_for(
                 api.send_group_text(group, text, event_id=event_id), API_TIMEOUT
@@ -248,7 +268,9 @@ class JoinVerifier:
     async def _recall(self, event: AstrMessageEvent) -> None:
         try:
             await asyncio.wait_for(
-                QQGroupManageAPI(self.plugin._platform(event).client).recall_group_message(
+                QQGroupManageAPI(
+                    self.plugin._platform(event).client
+                ).recall_group_message(
                     event.get_group_id(), str(event.message_obj.message_id)
                 ),
                 API_TIMEOUT,
@@ -263,11 +285,34 @@ class JoinVerifier:
         *,
         event: AstrMessageEvent | None = None,
         event_id: str = "",
+        action: str = "",
     ) -> None:
-        """先落盘失败状态再禁言；禁言失败只记日志，仍等待管理员处理。"""
+        """先保存失败状态，再执行本次失败对应的处理。"""
         umo = self.plugin._group_umo(record["platform_id"], record["group_openid"])
         record["status"] = "failed"
+        action_key = "verify_timeout_action" if action else "verify_fail_action"
+        action = action or str(self._setting(umo, "verify_fail_action", "禁言"))
+        record["fail_action"] = action
         self.storage.put_verification(record)
+        if action == "移出群聊":
+            try:
+                await self.plugin.remover.remove(
+                    record["platform_id"],
+                    record["group_openid"],
+                    record["member_openid"],
+                    "verify:" + record["token"],
+                    verification_locked=True,
+                    can_execute=lambda: (
+                        bool(self._setting(umo, "enable_join_verify", False))
+                        and self._setting(umo, action_key, "禁言") == "移出群聊"
+                    ),
+                )
+                text = "进群验证未通过，已移出群聊。"
+            except Exception as exc:
+                logger.exception("[进群验证] 验证失败后移出未成功")
+                text = f"进群验证未通过，移出未完成，请管理员处理（{exc}）。"
+            await self._notice(platform, record, text, event=event, event_id=event_id)
+            return
         duration = str(self._setting(umo, "verify_fail_mute_duration", "1天") or "1天")
         try:
             seconds = parse_duration(duration)
@@ -288,7 +333,9 @@ class JoinVerifier:
 
     # ---------- 事件入口 ----------
 
-    async def prepare(self, platform_id: str, item: dict[str, Any]) -> dict[str, Any] | None:
+    async def prepare(
+        self, platform_id: str, item: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """进群后先登记待验证，欢迎消息发送期间也能拦截发言；题目由 deliver 发送。"""
         group = str(item.get("group_openid") or "")
         member = str(item.get("member_openid") or "")
@@ -334,7 +381,9 @@ class JoinVerifier:
 
     async def guard(self, event: AstrMessageEvent) -> None:
         key = (event.get_platform_id(), event.get_group_id(), event.get_sender_id())
-        if self.storage.verification(*key) is None or not self.plugin._is_qq_group(event):
+        if self.storage.verification(*key) is None or not self.plugin._is_qq_group(
+            event
+        ):
             return
         umo = self.plugin._event_group_umo(event)
         if not self._setting(umo, "enable_join_verify", False):
@@ -392,8 +441,12 @@ class JoinVerifier:
             try:
                 correct = check_custom_answer(record["answer"], text)
             except (ValueError, TimeoutError):
-                logger.exception("[进群验证] 验证题正则无效或匹配超时：%s", record["question"])
-                await self._reply(event, "验证题配置有误，本次作答不计次数，请联系管理员。")
+                logger.exception(
+                    "[进群验证] 验证题正则无效或匹配超时：%s", record["question"]
+                )
+                await self._reply(
+                    event, "验证题配置有误，本次作答不计次数，请联系管理员。"
+                )
                 return
         else:
             correct = text == record["options"][record["answer"]]
@@ -428,7 +481,9 @@ class JoinVerifier:
 
         async def acknowledge(code: int) -> None:
             try:
-                await asyncio.wait_for(api.acknowledge_interaction(interaction_id, code), 3)
+                await asyncio.wait_for(
+                    api.acknowledge_interaction(interaction_id, code), 3
+                )
             except Exception:
                 logger.warning("[进群验证] 回应验证按钮失败", exc_info=True)
 
@@ -521,7 +576,11 @@ class JoinVerifier:
         for record in self.storage.verifications():
             if not self._timed_out(record, now):
                 continue
-            key = (record["platform_id"], record["group_openid"], record["member_openid"])
+            key = (
+                record["platform_id"],
+                record["group_openid"],
+                record["member_openid"],
+            )
             lock = self._lock(key)
             if lock.locked():
                 continue  # 正在作答或被管理员处理，下一轮再看
@@ -544,7 +603,9 @@ class JoinVerifier:
                         platform, record, intro="验证时间已到，请尽快完成进群验证："
                     )
                 elif action == TIMEOUT_FAIL:
-                    await self._fail(platform, record)
+                    await self._fail(platform, record, action="禁言")
+                elif action == TIMEOUT_KICK:
+                    await self._fail(platform, record, action="移出群聊")
 
     # ---------- 管理员指令 ----------
 
@@ -571,7 +632,11 @@ class JoinVerifier:
                 if record is None:
                     continue
                 released += 1
-                if record["status"] == "failed" and (error := await self._unmute(event, member)):
+                if (
+                    record["status"] == "failed"
+                    and record.get("fail_action", "禁言") == "禁言"
+                    and (error := await self._unmute(event, member))
+                ):
                     failures.append(error)
         if not released:
             return "被艾特的成员都没有待处理的进群验证。"
@@ -590,7 +655,11 @@ class JoinVerifier:
             key = (event.get_platform_id(), event.get_group_id(), member)
             async with self._lock(key):
                 old = self.storage.verification(*key)
-                if old is not None and old["status"] == "failed":
+                if (
+                    old is not None
+                    and old["status"] == "failed"
+                    and old.get("fail_action", "禁言") == "禁言"
+                ):
                     if error := await self._unmute(event, member):
                         failures.append(error)
                 record = self._new_record(*key)

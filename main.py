@@ -22,10 +22,14 @@ from .durations import parse_duration
 from .storage import PluginStorage
 from .group_config import GroupConfig
 from .keyword_rules import JOIN_REGEX_KEYS, compile_join_pattern, match_join_rules
-from .join_verify import VERIFY_MODES
+from .join_verify import VERIFY_MODES, TIMEOUT_ACTIONS
+from .member_removal import MemberRemover
 from .settings_menu import (
     KEYWORD_VALUES,
     WORD_LISTS,
+    PAGES,
+    WORD_PAGES,
+    link,
     keyword_summary,
     verify_summary,
     word_page,
@@ -69,37 +73,64 @@ class FeatureDefinition:
 
 
 FEATURES = (
-    FeatureDefinition("禁言指令", "enable_mute_command", "群内指令"),
+    FeatureDefinition("禁言指令", "enable_mute_command", "成员管理"),
     FeatureDefinition(
         "禁言成功提示",
         "silent_mute_success_notice",
-        "群内指令",
+        "成员管理",
         default=False,
         inverted=True,
     ),
-    FeatureDefinition("禁言状态指令", "enable_mute_status_command", "群内指令"),
-    FeatureDefinition("群管指令", "enable_group_admin_commands", "群内指令"),
-    FeatureDefinition("入群申请通知", "enable_join_notice", "自动通知"),
-    FeatureDefinition("入群申请审批", "enable_join_reply_review", "自动通知"),
-    FeatureDefinition("成员进群通知", "enable_member_join_notice", "自动通知"),
-    FeatureDefinition("成员退群通知", "enable_member_leave_notice", "自动通知"),
+    FeatureDefinition("禁言状态指令", "enable_mute_status_command", "成员管理"),
+    FeatureDefinition("群管指令", "enable_group_admin_commands", "群信息与权限"),
+    FeatureDefinition("入群申请通知", "enable_join_notice", "入群审批"),
+    FeatureDefinition("入群申请审批", "enable_join_reply_review", "入群审批"),
+    FeatureDefinition("成员进群通知", "enable_member_join_notice", "通知设置"),
+    FeatureDefinition("成员退群通知", "enable_member_leave_notice", "通知设置"),
     FeatureDefinition(
-        "入群关键词审批", "enable_join_keyword_review", "关键词管理", default=False
+        "入群关键词审批", "enable_join_keyword_review", "入群审批", default=False
     ),
-    FeatureDefinition("违禁词禁言", "enable_keyword_mute", "关键词管理", default=False),
+    FeatureDefinition("违禁词禁言", "enable_keyword_mute", "发言管理", default=False),
+    FeatureDefinition("违禁词撤回", "enable_keyword_recall", "发言管理", default=False),
+    FeatureDefinition("踢人指令", "enable_kick_command", "成员管理"),
+    FeatureDefinition("群主/管理员可踢人", "allow_native_admin_kick", "群信息与权限"),
     FeatureDefinition(
-        "违禁词撤回", "enable_keyword_recall", "关键词管理", default=False
+        "插件群管可踢人", "allow_plugin_admin_kick", "群信息与权限", default=False
+    ),
+    FeatureDefinition("违禁词踢人", "enable_keyword_kick", "发言管理", default=False),
+    FeatureDefinition("LLM踢人工具", "enable_kick_tool", "LLM工具", default=False),
+    FeatureDefinition(
+        "群主增删群管",
+        "allow_group_owner_manage_plugin_admins",
+        "群信息与权限",
+        default=False,
+    ),
+    FeatureDefinition(
+        "管理员增删群管",
+        "allow_group_admin_manage_plugin_admins",
+        "群信息与权限",
+        default=False,
+    ),
+    FeatureDefinition(
+        "严格工具权限", "strict_llm_permissions", "LLM工具", default=False
     ),
     FeatureDefinition("进群验证", "enable_join_verify", "进群验证", default=False),
-    FeatureDefinition("LLM禁言工具", "enable_mute_tool", "LLM 工具"),
-    FeatureDefinition("LLM解禁工具", "enable_unmute_tool", "LLM 工具"),
-    FeatureDefinition("LLM禁言状态工具", "enable_mute_status_tool", "LLM 工具"),
-    FeatureDefinition("LLM申请列表工具", "enable_join_list_tool", "LLM 工具"),
-    FeatureDefinition("LLM申请审批工具", "enable_join_review_tool", "LLM 工具"),
+    FeatureDefinition("LLM禁言工具", "enable_mute_tool", "LLM工具"),
+    FeatureDefinition("LLM解禁工具", "enable_unmute_tool", "LLM工具"),
+    FeatureDefinition("LLM禁言状态工具", "enable_mute_status_tool", "LLM工具"),
+    FeatureDefinition("LLM申请列表工具", "enable_join_list_tool", "LLM工具"),
+    FeatureDefinition("LLM申请审批工具", "enable_join_review_tool", "LLM工具"),
 )
 FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
 
 CONFIG_SECTIONS = {
+    "allow_native_admin_kick": "permission_settings",
+    "allow_plugin_admin_kick": "permission_settings",
+    "enable_kick_command": "command_settings",
+    "enable_kick_tool": "llm_tool_settings",
+    "enable_keyword_kick": "keyword_settings",
+    "kick_keywords": "keyword_settings",
+    "verify_fail_action": "verify_settings",
     "enabled_group_umos": "scope_settings",
     "enable_per_group_feature_settings": "scope_settings",
     "allow_group_owner_manage_plugin_admins": "permission_settings",
@@ -162,34 +193,33 @@ def format_feature_status(
     values: dict[str, bool],
     *,
     per_group: bool,
+    page: str = "",
 ) -> str:
     lines = [
-        "# 🛡️ 群管功能",
+        f"# 🛡️ {page or '群管功能'}",
         "",
-        f"当前开关模式：**{'分群' if per_group else '全局'}**",
+        f"当前配置：**{'分群' if per_group else '全局'}**",
+        "",
     ]
-    for category in dict.fromkeys(feature.category for feature in FEATURES):
-        lines.extend(("", f"## {category}", ""))
-        for feature in FEATURES:
-            if feature.category != category:
-                continue
-            enabled = values[feature.name]
-            status = "已开启" if enabled else "已关闭"
-            next_action = "关闭" if enabled else "开启"
-            command = quote(
-                f"群管功能 {feature.name} {next_action}",
-                safe="",
+    if not page:
+        for index in range(0, len(PAGES), 2):
+            lines.append(
+                " · ".join(
+                    link(name, f"群管功能 {name}") for name in PAGES[index : index + 2]
+                )
             )
-            status = (
-                f"[{status}]"
-                f"(mqqapi://aio/inlinecmd?command={command}"
-                "&enter=false&reply=false)"
-            )
-            lines.append(f"{feature.name}：{status}  ")
-    if per_group:
-        lines.extend(("", "> 点击蓝色状态可把相反操作填入输入框，不会自动发送。"))
-    else:
-        lines.extend(("", "> 全局模式只有框架管理员允许更改"))
+        return "\n".join(lines)
+    for feature in FEATURES:
+        if feature.category != page:
+            continue
+        enabled = values[feature.name]
+        status = "已开启" if enabled else "已关闭"
+        next_action = "关闭" if enabled else "开启"
+        lines.append(
+            f"{feature.name}："
+            + link(status, f"群管功能 {feature.name} {next_action}")
+            + "  "
+        )
     return "\n".join(lines)
 
 
@@ -371,6 +401,8 @@ def format_group_admin_help(default_duration: str) -> str:
         "> 解除成员禁言\n\n"
         "> `禁言状态`  \n"
         "> 查看全员禁言规则及被禁言成员\n\n"
+        "> `踢出 @用户` / `踢人 @用户`  \n"
+        "> 移出成员，使用权限可分别配置\n\n"
         "## 群管管理\n\n"
         "> `添加群管 @用户`  \n"
         "> 添加本群插件群管；默认仅 AstrBot 管理员可用\n\n"
@@ -464,7 +496,7 @@ def review_quote(event: AstrMessageEvent) -> set[str] | None:
     PLUGIN_NAME,
     "yun474",
     "QQ 官方机器人群管理：禁言、入群申请审批、分群管理员与 LLM 工具",
-    "2.8.0",
+    "2.9.0",
 )
 class QQGroupAdminPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -489,6 +521,7 @@ class QQGroupAdminPlugin(Star):
         self._owned_parser_methods: dict[str, Any] = {}
         self._reviews_inflight: set[tuple[str, str, str]] = set()
         self._callback_guard = ReviewCallbackGuard()
+        self.remover = MemberRemover(self)
         self.verifier = JoinVerifier(self)
         self._verify_task: asyncio.Task | None = None
         self._install_parser_patch()
@@ -1198,6 +1231,9 @@ class QQGroupAdminPlugin(Star):
         if not self._can_manage(event):
             yield event.plain_result("你没有本群群管权限。")
             return
+        if self._verification_can_kick(event) and not self._can_kick(event):
+            yield event.plain_result("当前验证可移出成员，重新验证需要本群踢人权限。")
+            return
         targets = self._mentioned_members(event)
         if not targets:
             yield event.plain_result("请艾特要重新验证的成员，例如：重新验证 @用户")
@@ -1212,7 +1248,8 @@ class QQGroupAdminPlugin(Star):
         recall_enabled = self._event_feature_setting(
             event, "enable_keyword_recall", False
         )
-        if not mute_enabled and not recall_enabled:
+        kick_enabled = self._event_feature_setting(event, "enable_keyword_kick", False)
+        if not mute_enabled and not recall_enabled and not kick_enabled:
             return
         sender = event.get_sender_id()
         if not sender or sender == event.get_self_id():
@@ -1226,7 +1263,13 @@ class QQGroupAdminPlugin(Star):
         text = "".join(
             part.text for part in event.get_messages() if isinstance(part, Plain)
         )
-        if not contains_keyword(text, self._event_setting(event, "mute_keywords", [])):
+        mute_match = contains_keyword(
+            text, self._event_setting(event, "mute_keywords", [])
+        )
+        kick_match = kick_enabled and contains_keyword(
+            text, self._event_setting(event, "kick_keywords", [])
+        )
+        if not ((mute_enabled or recall_enabled) and mute_match) and not kick_match:
             return
         if not await self._sdk_group_enabled(self._event_group_umo(event)):
             return
@@ -1246,7 +1289,7 @@ class QQGroupAdminPlugin(Star):
             return
         # Consume matched messages even if QQ rejects the mute, keeping commands/LLM silent.
         event.stop_event()
-        if recall_enabled:
+        if recall_enabled and (mute_match or kick_match):
             try:
                 # Never use a quoted message ID or a session's last message ID.
                 message_id = getattr(event.message_obj, "message_id", "")
@@ -1260,7 +1303,24 @@ class QQGroupAdminPlugin(Star):
                 )
             except Exception:
                 logger.exception("[%s] 违禁词消息撤回失败", PLUGIN_NAME)
-        if not mute_enabled:
+        if kick_match:
+            try:
+                await self.remover.remove(
+                    event.get_platform_id(),
+                    event.get_group_id(),
+                    sender,
+                    "keyword:" + str(event.message_obj.message_id),
+                    can_execute=lambda: (
+                        self._event_feature_setting(event, "enable_keyword_kick", False)
+                        and contains_keyword(
+                            text, self._event_setting(event, "kick_keywords", [])
+                        )
+                    ),
+                )
+            except Exception:
+                logger.exception("[%s] 关键词自动踢人失败", PLUGIN_NAME)
+            return
+        if not mute_enabled or not mute_match:
             return
         try:
             seconds = parse_duration(
@@ -1410,6 +1470,50 @@ class QQGroupAdminPlugin(Star):
             return
         yield event.plain_result(f"已解除 {len(targets)} 名成员的禁言。")
 
+    @filter.command("踢出", alias={"踢人"})
+    async def kick_command(self, event: AstrMessageEvent) -> None:
+        """移出被艾特的成员，最多同时处理十人。"""
+        if not self._is_qq_group(event):
+            yield event.plain_result("该指令仅支持 QQ 官方机器人群聊。")
+            return
+        if not self._event_feature_setting(event, "enable_kick_command", True):
+            yield event.plain_result("踢人指令已关闭。")
+            return
+        if not self._can_kick(event):
+            yield event.plain_result("你没有本群踢人权限。")
+            return
+        targets = self._mentioned_members(event, limit=None)
+        if not targets:
+            yield event.plain_result("请艾特要移出的成员，例如：踢出 @成员")
+            return
+        if len(targets) > 10:
+            yield event.plain_result("每次最多移出 10 名成员，请减少艾特人数。")
+            return
+        failures = []
+        success = 0
+        for member in targets:
+            try:
+                await self.remover.remove(
+                    event.get_platform_id(),
+                    event.get_group_id(),
+                    member,
+                    "command:" + str(event.message_obj.message_id),
+                    actor_id=event.get_sender_id(),
+                    can_execute=lambda: (
+                        self._can_kick(event)
+                        and self._event_feature_setting(
+                            event, "enable_kick_command", True
+                        )
+                    ),
+                )
+                success += 1
+            except Exception as exc:
+                failures.append(f"- {member}：{exc}")
+        result = f"已移出 {success} 名成员。"
+        if failures:
+            result += "\n以下成员未完成移出：\n" + "\n".join(failures)
+        yield event.plain_result(result)
+
     @filter.command("添加群管")
     async def add_group_admin(self, event: AstrMessageEvent) -> None:
         if not self._is_qq_group(event):
@@ -1509,9 +1613,13 @@ class QQGroupAdminPlugin(Star):
             yield event.plain_result("该指令仅支持已启用的 QQ 官方机器人群聊。")
             return
         per_group = bool(self._config("enable_per_group_feature_settings", False))
+        page_requested = feature_name in PAGES and not action and not value
         changing = bool(feature_name or action) and not (
-            (feature_name in WORD_LISTS or feature_name in KEYWORD_VALUES)
-            and action in {"", "查看"}
+            page_requested
+            or (
+                (feature_name in WORD_LISTS or feature_name in KEYWORD_VALUES)
+                and action in {"", "查看"}
+            )
         )
         if not per_group and changing and not self._is_astr_admin(event):
             yield event.plain_result("你没有权限更改配置项，别乱动人家的功能啊！")
@@ -1519,13 +1627,24 @@ class QQGroupAdminPlugin(Star):
         if not self._can_manage(event):
             yield event.plain_result("你没有本群群管权限。")
             return
+        if page_requested or not (feature_name or action):
+            yield event.plain_result(
+                self._feature_page(event, feature_name)
+            ).use_markdown(True)
+            return
 
         if feature_name in WORD_LISTS or feature_name in KEYWORD_VALUES:
-            # AstrBot's older command parser splits string args on spaces. Read the
-            # remaining original text so one phrase stays one word-list entry.
+            # 旧版命令解析器按空格切分，重新读取原文以保留完整词条。
             parts = event.get_message_str().strip().split(maxsplit=3)
             if parts and parts[0] == "群管功能" and len(parts) == 4:
                 value = parts[3]
+            kick_setting = feature_name == "踢人词" or (
+                KEYWORD_VALUES.get(feature_name, "").startswith("verify_")
+                and (value == "移出群聊" or self._verification_can_kick(event))
+            )
+            if changing and kick_setting and not self._can_kick(event):
+                yield event.plain_result("修改自动踢人规则需要本群踢人权限。")
+                return
             try:
                 result = self._keyword_config_command(
                     event, feature_name, action, value
@@ -1533,53 +1652,71 @@ class QQGroupAdminPlugin(Star):
             except (ValueError, OSError) as exc:
                 yield event.plain_result(f"配置未修改：{exc}")
                 return
+            if action not in {"", "查看"}:
+                page = WORD_PAGES.get(feature_name, "进群验证")
+                if feature_name in {"进群匹配模式", "白黑词优先级"}:
+                    page = "入群审批"
+                elif feature_name == "违禁词时长":
+                    page = "发言管理"
+                result += "\n\n" + link("返回分类", f"群管功能 {page}")
             yield event.plain_result(result).use_markdown(True)
             return
 
-        if feature_name or action:
-            feature = FEATURES_BY_NAME.get(feature_name.strip())
-            if feature is None:
-                available = "、".join(
-                    [*(item.name for item in FEATURES), *WORD_LISTS, *KEYWORD_VALUES]
-                )
-                yield event.plain_result(f"未知功能。可用功能：{available}")
-                return
-            normalized_action = action.strip()
-            if normalized_action in {"开启", "打开", "启用", "开"}:
-                enabled = True
-            elif normalized_action in {"关闭", "停用", "关"}:
-                enabled = False
-            else:
-                yield event.plain_result(
-                    f"用法：群管功能 {feature.name} 开启（或关闭）"
-                )
-                return
-            raw_value = not enabled if feature.inverted else enabled
-            try:
-                self._save_setting(event, feature.key, raw_value)
-            except Exception as exc:
-                yield event.plain_result(f"保存功能开关失败：{exc}")
-                return
+        feature = FEATURES_BY_NAME.get(feature_name.strip())
+        if feature is None:
             yield event.plain_result(
-                f"{feature.name}已{'开启' if enabled else '关闭'}。"
+                "未知功能。\n" + link("返回首页", "群管功能")
+            ).use_markdown(True)
+            return
+        if feature.key in {
+            "allow_native_admin_kick",
+            "allow_plugin_admin_kick",
+        } and not self._can_set_kick_permissions(event):
+            yield event.plain_result(
+                "仅 AstrBot 管理员或 QQ 群主/管理员可修改踢人授权。"
             )
             return
-
-        values: dict[str, bool] = {}
-        group_umo = self._event_group_umo(event) if per_group else ""
-        for feature in FEATURES:
-            raw_value = self._feature_setting(
-                feature.key,
-                group_umo,
-                feature.default,
-            )
-            values[feature.name] = not raw_value if feature.inverted else raw_value
+        normalized_action = action.strip()
+        if normalized_action in {"开启", "打开", "启用", "开"}:
+            enabled = True
+        elif normalized_action in {"关闭", "停用", "关"}:
+            enabled = False
+        else:
+            yield event.plain_result(f"用法：群管功能 {feature.name} 开启（或关闭）")
+            return
+        kick_setting = feature.key == "enable_keyword_kick" or (
+            feature.key == "enable_join_verify" and self._verification_can_kick(event)
+        )
+        if enabled and kick_setting and not self._can_kick(event):
+            yield event.plain_result("启用自动踢人需要本群踢人权限。")
+            return
+        raw_value = not enabled if feature.inverted else enabled
+        try:
+            self._save_setting(event, feature.key, raw_value)
+        except Exception as exc:
+            yield event.plain_result(f"保存功能开关失败：{exc}")
+            return
         yield event.plain_result(
-            format_feature_status(values, per_group=per_group)
-            + "\n\n群 UMO：`"
-            + self._event_group_umo(event)
-            + "`"
-            + keyword_summary(
+            f"{feature.name}已{'开启' if enabled else '关闭'}。"
+            + "\n\n"
+            + link("返回分类", f"群管功能 {feature.category}")
+        ).use_markdown(True)
+
+    def _feature_page(self, event: AstrMessageEvent, page: str = "") -> str:
+        per_group = bool(self._config("enable_per_group_feature_settings", False))
+        values = {}
+        for feature in FEATURES:
+            if feature.category != page:
+                continue
+            raw = self._event_feature_setting(event, feature.key, feature.default)
+            values[feature.name] = not raw if feature.inverted else raw
+        content = format_feature_status(
+            values,
+            per_group=per_group,
+            page=page,
+        )
+        if page in {"入群审批", "发言管理"}:
+            content += keyword_summary(
                 {
                     **{
                         key: self._event_setting(event, key, [])
@@ -1594,10 +1731,46 @@ class QQGroupAdminPlugin(Star):
                     "keyword_mute_duration": self._event_setting(
                         event, "keyword_mute_duration", "10分"
                     ),
-                }
+                },
+                page,
             )
-            + verify_summary(self._event_setting(event, "verify_mode", "算术题"))
-        ).use_markdown(True)
+        elif page == "进群验证":
+            content += verify_summary(
+                self._event_setting(event, "verify_mode", "算术题"),
+                {
+                    key: self._event_setting(event, key, default)
+                    for key, default in {
+                        "verify_fail_action": "禁言",
+                        "verify_timeout_action": "按失败禁言",
+                        "verify_max_failures": 3,
+                        "verify_fail_mute_duration": "1天",
+                        "verify_timeout_minutes": 10,
+                    }.items()
+                },
+            )
+        elif page == "成员管理":
+            content += "\n\n" + " · ".join(
+                link(name, command)
+                for name, command in (
+                    ("禁言", "禁言 "),
+                    ("解禁", "解禁 "),
+                    ("踢出", "踢出 "),
+                    ("禁言状态", "禁言状态"),
+                )
+            )
+        elif page == "群信息与权限":
+            content += "\n\n群 UMO：`" + self._event_group_umo(event) + "`\n\n"
+            content += " · ".join(
+                link(name, command)
+                for name, command in (
+                    ("群管列表", "群管列表"),
+                    ("添加群管", "添加群管 "),
+                    ("删除群管", "删除群管 "),
+                )
+            )
+        if page:
+            content += "\n\n" + link("返回首页", "群管功能")
+        return content.replace("\n", "  \n")
 
     def _save_setting(self, event: AstrMessageEvent, key: str, value: Any) -> None:
         if self._config("enable_per_group_feature_settings", False):
@@ -1617,7 +1790,7 @@ class QQGroupAdminPlugin(Star):
             regex_mode = key in JOIN_REGEX_KEYS and mode == "正则匹配"
             words = list(self._event_setting(event, key, []))
             if action in {"", "查看"}:
-                return word_page(name, words, int(value or "1"), mode)
+                return word_page(name, words, int(value or "1"))
             if action == "清空":
                 if value != "确认":
                     raise ValueError(f"清空需发送：群管功能 {name} 清空 确认")
@@ -1657,6 +1830,17 @@ class QQGroupAdminPlugin(Star):
         if key == "join_keyword_priority":
             if value not in {"白词优先", "黑词优先"}:
                 raise ValueError("请选择 白词优先 或 黑词优先")
+        elif key == "verify_fail_action":
+            if value not in {"禁言", "移出群聊"}:
+                raise ValueError("请选择 禁言 或 移出群聊")
+        elif key == "verify_timeout_action":
+            if value not in TIMEOUT_ACTIONS:
+                raise ValueError("请选择 " + " 或 ".join(TIMEOUT_ACTIONS))
+        elif key in {"verify_max_failures", "verify_timeout_minutes"}:
+            value = int(value)
+            minimum = 1 if key == "verify_max_failures" else 0
+            if value < minimum:
+                raise ValueError(f"数值必须大于等于 {minimum}")
         elif key == "verify_mode":
             if value not in VERIFY_MODES:
                 raise ValueError("请选择 " + " 或 ".join(VERIFY_MODES))
@@ -1672,7 +1856,7 @@ class QQGroupAdminPlugin(Star):
             seconds = parse_duration(value)
             self._validate_duration(seconds, self._event_group_umo(event))
             if seconds == 0:
-                raise ValueError("违禁词禁言时长必须大于 0")
+                raise ValueError("禁言时长必须大于 0")
         self._save_setting(event, key, value)
         return f"{name}已保存。"
 
@@ -1699,6 +1883,38 @@ class QQGroupAdminPlugin(Star):
             yield event.plain_result("查询禁言状态失败：接口返回格式异常。")
             return
         yield event.plain_result(format_mute_status(result))
+
+    @filter.llm_tool(name="qq_group_kick_member")
+    async def kick_tool(self, event: Any, member_openid: str) -> str:
+        """移出当前 QQ 群的一名成员，始终检查唤醒人的踢人使用权限。
+
+        Args:
+            member_openid(string): 要移出的成员在当前群中的 OpenID
+        """
+        event = resolve_tool_event(event)
+        if not self._is_qq_group(event):
+            return "该工具仅支持 QQ 官方机器人群聊。"
+        if not self._event_feature_setting(event, "enable_kick_tool", False):
+            return "QQ 群踢人工具已关闭。"
+        if not self._can_kick(event):
+            return "唤醒人没有本群踢人权限。"
+        if member_openid == event.get_self_id():
+            return "不能移出机器人自身。"
+        try:
+            await self.remover.remove(
+                event.get_platform_id(),
+                event.get_group_id(),
+                member_openid,
+                "tool:" + str(event.message_obj.message_id),
+                actor_id=event.get_sender_id(),
+                can_execute=lambda: (
+                    self._can_kick(event)
+                    and self._event_feature_setting(event, "enable_kick_tool", False)
+                ),
+            )
+        except Exception as exc:
+            return f"移出成员未完成：{exc}"
+        return "已成功移出该成员。"
 
     @filter.llm_tool(name="qq_group_mute_member")
     async def mute_tool(
@@ -2162,6 +2378,30 @@ class QQGroupAdminPlugin(Star):
     def _group_umo(platform_id: str, group_openid: str) -> str:
         return f"{platform_id}:GroupMessage:{group_openid}"
 
+    def _verification_can_kick(self, event: AstrMessageEvent) -> bool:
+        return any(
+            self._event_setting(event, key, "") == "移出群聊"
+            for key in ("verify_fail_action", "verify_timeout_action")
+        )
+
+    def _can_set_kick_permissions(self, event: AstrMessageEvent) -> bool:
+        return self._is_astr_admin(event) or self._qq_member_role(event) in {
+            "owner",
+            "admin",
+        }
+
+    def _can_kick(self, event: AstrMessageEvent) -> bool:
+        if self._is_astr_admin(event):
+            return True
+        native = self._qq_member_role(event) in {
+            "owner",
+            "admin",
+        } and self._event_feature_setting(event, "allow_native_admin_kick", True)
+        assigned = event.get_sender_id() in self.storage.group_admins(
+            event.get_group_id()
+        ) and self._event_feature_setting(event, "allow_plugin_admin_kick", False)
+        return native or assigned
+
     def _can_manage(self, event: AstrMessageEvent) -> bool:
         get_admins = getattr(self.storage, "group_admins", None)
         group_admins = get_admins(event.get_group_id()) if callable(get_admins) else []
@@ -2172,7 +2412,9 @@ class QQGroupAdminPlugin(Star):
             or self._qq_member_role(event) in {"owner", "admin"}
         )
 
-    def _mentioned_members(self, event: AstrMessageEvent) -> list[str]:
+    def _mentioned_members(
+        self, event: AstrMessageEvent, limit: int | None = 10
+    ) -> list[str]:
         raw = getattr(event.message_obj, "raw_message", None)
         mentions = getattr(raw, "mentions", None) or []
         targets: list[str] = []
@@ -2193,7 +2435,7 @@ class QQGroupAdminPlugin(Star):
             }:
                 if str(part.qq) not in targets:
                     targets.append(str(part.qq))
-        return targets[:10]
+        return targets if limit is None else targets[:limit]
 
     def _validate_duration(self, seconds: int, group_umo: str = "") -> None:
         maximum = max(
@@ -2255,6 +2497,9 @@ class QQGroupAdminPlugin(Star):
         self._sdk_event_tasks.clear()
         self._patch_task = None
         self._verify_task = None
+        remover = getattr(self, "remover", None)
+        if remover is not None:
+            await remover.close()
 
 
 def render_member_notice(
