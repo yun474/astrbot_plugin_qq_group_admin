@@ -488,8 +488,9 @@
               "umo": {
                 "description": "群 UMO",
                 "type": "string",
+                "_special": "umo",
                 "default": "",
-                "hint": "平台ID:GroupMessage:真实群ID。不要填独立会话产生的用户 ID；可在群内发送 群管功能 查看。"
+                "hint": "选择目标群的会话来源。独立会话模式下，可在群内发送 群管功能 查看真实群 UMO，再手动输入。"
               },
               "confirmed": {
                 "description": "已确认 UMO 属于目标群",

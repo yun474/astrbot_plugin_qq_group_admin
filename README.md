@@ -8,7 +8,7 @@
 
 ✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 · WebSocket / Webhook ✨
 
-[![版本 2.9.0](https://img.shields.io/badge/版本-2.9.0-89b4fa.svg)](CHANGELOG.md)
+[![版本 2.9.1](https://img.shields.io/badge/版本-2.9.1-89b4fa.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-a3be8c.svg)](LICENSE)
 [![作者 yun474](https://img.shields.io/badge/作者-yun474-f5b7c7.svg)](https://github.com/yun474)
 
@@ -191,7 +191,7 @@ AstrBot 管理员拥有踢人权限。两项授权适用于人工指令和 LLM �
 - 关闭分群时，各群使用全局配置。
 - 开启分群后，按群 UMO 配置权限、指令、通知、词表、验证和工具。
 - 群内首次修改会自动建立该群条目，后续修改同步保存到 WebUI。
-- 群 UMO 使用 `平台ID:GroupMessage:真实群ID`，可在「群信息与权限」中查看。
+- 新增群配置时，AstrBot WebUI v4.29.4 起可在「群 UMO」中选择会话。群 UMO 格式为 `平台ID:GroupMessage:真实群ID`，也可在「群信息与权限」中查看后手动输入。
 - 编辑 WebUI 前重新打开配置页，即可读取群内修改后的最新内容。
 
 旧配置会迁入新面板。显示为待确认的群条目，可在目标群查询 UMO 后填写，并开启「已确认 UMO 属于目标群」。

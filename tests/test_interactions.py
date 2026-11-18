@@ -148,6 +148,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.api = NS(
             acknowledge_interaction=AsyncMock(),
             review_join_request=AsyncMock(),
+            send_group_markdown=AsyncMock(),
             send_group_text=AsyncMock(),
             get_mute_status=AsyncMock(return_value={}),
             list_join_requests=AsyncMock(return_value={"list": []}),
@@ -211,6 +212,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await self.plugin._handle_review_interaction("p", self.interaction())
                 self.api.review_join_request.assert_not_awaited()
+                self.api.send_group_markdown.assert_not_awaited()
                 self.api.send_group_text.assert_not_awaited()
                 self.api.acknowledge_interaction.assert_awaited_with(
                     "interaction-id", 4
@@ -295,17 +297,26 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shared_callback_approves_once_and_survives_storage_reload(self):
         self.plugin.storage = PluginStorage(self.plugin.storage.path)
+        http = make_http(data={"id": "review-result"})
+        self.client.api = NS(_http=http)
+        self.api.send_group_markdown.side_effect = QQGroupManageAPI(
+            self.client
+        ).send_group_markdown
         callback = self.interaction()
         self.assertTrue(await self.plugin._handle_review_interaction("p", callback))
         self.api.review_join_request.assert_awaited_once_with(
             "g", "applicant", "request", approve=True
         )
         self.api.get_group_member_info.assert_not_awaited()
-        self.api.send_group_text.assert_awaited_once_with(
-            "g",
-            '<qqbot-at-user id="astr-admin" /> 已同意入群申请。',
-            event_id="outer-event",
+        http._session.request.assert_called_once()
+        payload = http._session.request.call_args.kwargs["json"]
+        self.assertEqual(payload["msg_type"], 2)
+        self.assertEqual(
+            payload["markdown"],
+            {"content": '<qqbot-at-user id="astr-admin" /> 已同意入群申请。'},
         )
+        self.assertEqual(payload["event_id"], "outer-event")
+        self.api.send_group_text.assert_not_awaited()
         self.assertIsNone(self.plugin.storage.get_pending("notice"))
         self.now += 2
         await self.plugin._handle_review_interaction("p", callback)
@@ -478,6 +489,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(self.api.get_group_member_info.await_count, 25)
         self.api.acknowledge_interaction.assert_awaited_with("interaction-id", 4)
+        self.api.send_group_markdown.assert_not_awaited()
         self.api.send_group_text.assert_not_awaited()
         await self.plugin._handle_review_interaction("p", self.interaction())
         self.api.review_join_request.assert_awaited_once()
@@ -603,8 +615,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.review_join_request.await_count, 1)
 
     async def test_send_failure_does_not_restore_completed_application(self):
-        self.api.send_group_text.side_effect = RuntimeError("send failed")
+        self.api.send_group_markdown.side_effect = RuntimeError("markdown unavailable")
         await self.plugin._handle_review_interaction("p", self.interaction())
+        self.api.send_group_text.assert_not_awaited()
         self.assertIsNone(self.plugin.storage.get_pending("notice"))
         self.assertFalse(self.plugin._reviews_inflight)
 
@@ -613,7 +626,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._handle_review_interaction("p", self.interaction())
         self.assertIsNotNone(self.plugin.storage.get_pending("notice"))
         self.assertFalse(self.plugin._reviews_inflight)
-        self.assertIn("审批失败", self.api.send_group_text.await_args.args[1])
+        self.assertIn("审批失败", self.api.send_group_markdown.await_args.args[1])
 
     async def test_sdk_parser_routes_callbacks_and_preserves_other_plugins(self):
         original = AsyncMock()

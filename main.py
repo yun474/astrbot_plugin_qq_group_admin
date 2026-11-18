@@ -1198,8 +1198,7 @@ class QQGroupAdminPlugin(Star):
                     "已同意入群申请。" if action == "approve" else "已拒绝入群申请。"
                 )
             try:
-                # 结果前艾特点击按钮的处理人，方便群内知道是谁审批的。
-                await api.send_group_text(
+                await api.send_group_markdown(
                     group,
                     f'<qqbot-at-user id="{sender}" /> {result}',
                     event_id=str(
@@ -1207,7 +1206,6 @@ class QQGroupAdminPlugin(Star):
                     ),
                 )
             except Exception:
-                # The approval may already have succeeded; never repeat it for a send failure.
                 logger.exception("[%s] 发送按钮审批结果失败", PLUGIN_NAME)
         finally:
             self._reviews_inflight.discard(request_key)
