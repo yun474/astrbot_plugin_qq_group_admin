@@ -7,6 +7,7 @@
       "enabled_group_umos": {
         "description": "启用群消息环境白名单（UMO）",
         "type": "list",
+        "_special": "umo",
         "items": {
           "type": "string"
         },
