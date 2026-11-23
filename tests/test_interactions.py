@@ -104,6 +104,10 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.context.get_config = configs.__getitem__
         with patch("astrbot_plugin_qq_group_admin.main.SessionPluginManager", None):
             self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            with patch.dict(configs[actor], plugin_set=["*", "extra"], disabled_plugins=["other"]):
+                self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+                configs[actor]["disabled_plugins"] = ["astrbot_plugin_qq_group_admin"]
+                self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
             for session in (group, actor):
                 for blocked in (
                     {"disabled_plugins": ["astrbot_plugin_qq_group_admin"]},
@@ -114,6 +118,27 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(session=session, blocked=blocked):
                         with patch.dict(configs[session], blocked):
                             self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
+
+    async def test_isolated_callback_uses_final_profile_whitelist_and_admins(self):
+        group, actor = "p:GroupMessage:g", "p:GroupMessage:user_g"
+        group_config = {"platform_settings": {"unique_session": True}, "admins_id": ["user"]}
+        actor_config = {
+            "platform_settings": {
+                "enable_id_white_list": True,
+                "id_whitelist": ["other"],
+                "wl_ignore_admin_on_group": True,
+            }
+        }
+        self.plugin.context.get_config = {group: group_config, actor: actor_config}.__getitem__
+        with patch("astrbot_plugin_qq_group_admin.main.SessionPluginManager", None):
+            self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
+            actor_config["admins_id"] = ["user"]
+            self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            actor_config["admins_id"] = []
+            group_config["platform_settings"].update(enable_id_white_list=True, id_whitelist=["other"])
+            actor_config["platform_settings"]["id_whitelist"] = [actor]
+            self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            self.assertFalse(await self.plugin._sdk_group_enabled(group))
 
     def setUp(self):
         self.service_enabled, self.session_enabled = mock_legacy_session_managers(self)

@@ -2497,30 +2497,35 @@ class QQGroupAdminPlugin(Star):
         try:
             config = self.context.get_config(umo)
             # 生命周期检查真实群；按钮回调还需检查点击者的隔离会话。
-            settings = config.get("platform_settings", {})
+            group_id = umo.split(":", 2)[-1]
+            actor_umo = umo
+            if actor_id and config.get("platform_settings", {}).get("unique_session", False):
+                actor_umo = f"{umo.rsplit(':', 1)[0]}:{actor_id}_{group_id}"
+            # 4.30 按最终会话选择白名单及管理员配置，群级停用仍需独立检查。
+            actor_config = config
+            if actor_umo != umo and SessionPluginManager is None:
+                actor_config = self.context.get_config(actor_umo)
+            settings = actor_config.get("platform_settings", {})
             whitelist = {
                 str(value).strip()
                 for value in settings.get("id_whitelist", [])
                 if str(value).strip()
             }
-            group_id = umo.split(":", 2)[-1]
-            actor_umo = umo
-            if actor_id and settings.get("unique_session", False):
-                actor_umo = f"{umo.rsplit(':', 1)[0]}:{actor_id}_{group_id}"
             exempt = bool(
                 actor_id
-                and actor_id in config.get("admins_id", [])
+                and actor_id in actor_config.get("admins_id", [])
                 and settings.get("wl_ignore_admin_on_group", False)
             )
             if settings.get("enable_id_white_list") and whitelist and not exempt:
                 if actor_umo not in whitelist and group_id not in whitelist:
                     return False
             for session in dict.fromkeys((umo, actor_umo)):
-                effective = config
-                if session != umo and SessionPluginManager is None:
-                    effective = self.context.get_config(session)
+                effective = config if session == umo else actor_config
                 plugins = effective.get("plugin_set", ["*"])
-                if plugins != ["*"] and PLUGIN_NAME not in plugins:
+                disabled = effective.get("disabled_plugins", []) if SessionPluginManager is None else []
+                # 4.30 在存在禁用项时展开列表中的通配符，再排除禁用插件。
+                all_plugins = "*" in plugins if disabled else plugins == ["*"]
+                if PLUGIN_NAME in disabled or (not all_plugins and PLUGIN_NAME not in plugins):
                     return False
                 if SessionPluginManager is None:
                     blacklist = {
@@ -2528,8 +2533,6 @@ class QQGroupAdminPlugin(Star):
                         for item in effective.get("platform_settings", {}).get("id_blacklist", [])
                     }
                     if session in blacklist or (group_id and group_id in blacklist):
-                        return False
-                    if PLUGIN_NAME in effective.get("disabled_plugins", []):
                         return False
                     continue
                 if not await SessionServiceManager.is_session_enabled(session):
