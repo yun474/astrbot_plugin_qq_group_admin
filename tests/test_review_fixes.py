@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from session_fakes import mock_waking_session
+
 from astrbot_plugin_qq_group_admin.main import QQGroupAdminPlugin, format_request
 
 
@@ -47,10 +49,7 @@ class ReviewFixTests(unittest.IsolatedAsyncioTestCase):
                             "astrbot.core.pipeline.waking_check.stage.star_handlers_registry.get_handlers_by_event_type",
                             return_value=[],
                         ),
-                        patch(
-                            "astrbot.core.pipeline.waking_check.stage.SessionPluginManager.filter_handlers_by_session",
-                            new=AsyncMock(return_value=[]),
-                        ),
+                        mock_waking_session(stage),
                     ):
                         await stage.process(event)
                     self.assertTrue(event.is_at_or_wake_command)

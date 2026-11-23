@@ -14,6 +14,7 @@ from astrbot_plugin_qq_group_admin.main import QQGroupAdminPlugin
 from astrbot_plugin_qq_group_admin.settings_menu import word_page
 from astrbot_plugin_qq_group_admin.storage import PluginStorage
 import test_keywords
+from session_fakes import mock_waking_session
 
 
 class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
@@ -154,10 +155,7 @@ class GroupConfigTests(unittest.IsolatedAsyncioTestCase):
                 "astrbot.core.pipeline.waking_check.stage.star_handlers_registry.get_handlers_by_event_type",
                 return_value=[],
             ),
-            patch(
-                "astrbot.core.pipeline.waking_check.stage.SessionPluginManager.filter_handlers_by_session",
-                new=AsyncMock(return_value=[]),
-            ),
+            mock_waking_session(stage),
         ):
             for event in events:
                 EventBus._apply_session_isolation(None, event, stage.ctx.astrbot_config)

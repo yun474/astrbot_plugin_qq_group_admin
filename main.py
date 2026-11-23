@@ -13,8 +13,16 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.core.star.session_plugin_manager import SessionPluginManager
-from astrbot.core.star.session_llm_manager import SessionServiceManager
+
+# AstrBot 4.30 将会话启停迁入有效配置，旧版本仍使用这两个管理器。
+try:
+    from astrbot.core.star.session_plugin_manager import SessionPluginManager
+except ModuleNotFoundError as exc:
+    if exc.name != "astrbot.core.star.session_plugin_manager":
+        raise
+    SessionPluginManager = None
+else:
+    from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 from .api import QQGroupManageAPI
 from .callback_guard import ReviewCallbackGuard
@@ -2488,9 +2496,6 @@ class QQGroupAdminPlugin(Star):
             return False
         try:
             config = self.context.get_config(umo)
-            plugins = config.get("plugin_set", ["*"])
-            if plugins != ["*"] and PLUGIN_NAME not in plugins:
-                return False
             # 生命周期检查真实群；按钮回调还需检查点击者的隔离会话。
             settings = config.get("platform_settings", {})
             whitelist = {
@@ -2511,6 +2516,22 @@ class QQGroupAdminPlugin(Star):
                 if actor_umo not in whitelist and group_id not in whitelist:
                     return False
             for session in dict.fromkeys((umo, actor_umo)):
+                effective = config
+                if session != umo and SessionPluginManager is None:
+                    effective = self.context.get_config(session)
+                plugins = effective.get("plugin_set", ["*"])
+                if plugins != ["*"] and PLUGIN_NAME not in plugins:
+                    return False
+                if SessionPluginManager is None:
+                    blacklist = {
+                        str(item).strip()
+                        for item in effective.get("platform_settings", {}).get("id_blacklist", [])
+                    }
+                    if session in blacklist or (group_id and group_id in blacklist):
+                        return False
+                    if PLUGIN_NAME in effective.get("disabled_plugins", []):
+                        return False
+                    continue
                 if not await SessionServiceManager.is_session_enabled(session):
                     return False
                 if not await SessionPluginManager.is_plugin_enabled_for_session(
