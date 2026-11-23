@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
 
+from session_fakes import mock_legacy_session_managers, mock_waking_session
+
 from astrbot.api.message_components import Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
@@ -17,12 +19,7 @@ from astrbot_plugin_qq_group_admin.storage import PluginStorage
 
 class KeywordTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        service_patch = patch(
-            "astrbot_plugin_qq_group_admin.main.SessionServiceManager.is_session_enabled",
-            new=AsyncMock(return_value=True),
-        )
-        self.service_enabled = service_patch.start()
-        self.addCleanup(service_patch.stop)
+        self.service_enabled, self.session_enabled = mock_legacy_session_managers(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.plugin = object.__new__(QQGroupAdminPlugin)
@@ -48,17 +45,10 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
             send_group_markdown=AsyncMock(return_value={"id": "notice"}),
             send_group_text=AsyncMock(return_value={"id": "notice"}),
         )
-        for target, value in (
-            ("QQGroupManageAPI", Mock(return_value=self.api)),
-            (
-                "SessionPluginManager.is_plugin_enabled_for_session",
-                AsyncMock(return_value=True),
-            ),
-        ):
-            patcher = patch("astrbot_plugin_qq_group_admin.main." + target, new=value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.session_enabled = value
+        api_patch = patch("astrbot_plugin_qq_group_admin.main.QQGroupManageAPI", return_value=self.api)
+        api_patch.start()
+        self.addCleanup(api_patch.stop)
+
 
     async def test_sdk_denies_disabled_or_non_whitelisted_group_before_approval(self):
         for settings, enabled in (
@@ -469,10 +459,7 @@ class KeywordTests(unittest.IsolatedAsyncioTestCase):
                 "astrbot.core.pipeline.waking_check.stage.star_handlers_registry.get_handlers_by_event_type",
                 return_value=[handler],
             ),
-            patch(
-                "astrbot.core.pipeline.waking_check.stage.SessionPluginManager.filter_handlers_by_session",
-                new=AsyncMock(side_effect=lambda event, handlers: handlers),
-            ),
+            mock_waking_session(stage),
         ):
             await stage.process(event)
         self.assertIn(handler, event.get_extra("activated_handlers"))

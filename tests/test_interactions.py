@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
 
+from session_fakes import mock_legacy_session_managers
+
 from astrbot.api.message_components import Plain, Reply
 from astrbot_plugin_qq_group_admin.api import QQGroupManageAPI
 from astrbot_plugin_qq_group_admin.callback_guard import ReviewCallbackGuard
@@ -96,19 +98,50 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(await self.plugin._sdk_group_enabled("p:GroupMessage:g"))
 
+    async def test_effective_config_checks_group_and_isolated_actor(self):
+        group, actor = "p:GroupMessage:g", "p:GroupMessage:user_g"
+        configs = {group: {"platform_settings": {"unique_session": True}}, actor: {}}
+        self.plugin.context.get_config = configs.__getitem__
+        with patch("astrbot_plugin_qq_group_admin.main.SessionPluginManager", None):
+            self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            with patch.dict(configs[actor], plugin_set=["*", "extra"], disabled_plugins=["other"]):
+                self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+                configs[actor]["disabled_plugins"] = ["astrbot_plugin_qq_group_admin"]
+                self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
+            for session in (group, actor):
+                for blocked in (
+                    {"disabled_plugins": ["astrbot_plugin_qq_group_admin"]},
+                    {"plugin_set": []},
+                    {"platform_settings": {"id_blacklist": ["g"]}},
+                    {"platform_settings": {"id_blacklist": [session]}},
+                ):
+                    with self.subTest(session=session, blocked=blocked):
+                        with patch.dict(configs[session], blocked):
+                            self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
+
+    async def test_isolated_callback_uses_final_profile_whitelist_and_admins(self):
+        group, actor = "p:GroupMessage:g", "p:GroupMessage:user_g"
+        group_config = {"platform_settings": {"unique_session": True}, "admins_id": ["user"]}
+        actor_config = {
+            "platform_settings": {
+                "enable_id_white_list": True,
+                "id_whitelist": ["other"],
+                "wl_ignore_admin_on_group": True,
+            }
+        }
+        self.plugin.context.get_config = {group: group_config, actor: actor_config}.__getitem__
+        with patch("astrbot_plugin_qq_group_admin.main.SessionPluginManager", None):
+            self.assertFalse(await self.plugin._sdk_group_enabled(group, "user"))
+            actor_config["admins_id"] = ["user"]
+            self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            actor_config["admins_id"] = []
+            group_config["platform_settings"].update(enable_id_white_list=True, id_whitelist=["other"])
+            actor_config["platform_settings"]["id_whitelist"] = [actor]
+            self.assertTrue(await self.plugin._sdk_group_enabled(group, "user"))
+            self.assertFalse(await self.plugin._sdk_group_enabled(group))
+
     def setUp(self):
-        service_patch = patch(
-            "astrbot_plugin_qq_group_admin.main.SessionServiceManager.is_session_enabled",
-            new=AsyncMock(return_value=True),
-        )
-        self.service_enabled = service_patch.start()
-        self.addCleanup(service_patch.stop)
-        session_patcher = patch(
-            "astrbot_plugin_qq_group_admin.main.SessionPluginManager.is_plugin_enabled_for_session",
-            new=AsyncMock(return_value=True),
-        )
-        self.session_enabled = session_patcher.start()
-        self.addCleanup(session_patcher.stop)
+        self.service_enabled, self.session_enabled = mock_legacy_session_managers(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.plugin = object.__new__(QQGroupAdminPlugin)
